@@ -1,0 +1,42 @@
+---
+# Stand up an in-cluster control-plane load balancer on each control-plane node (HA only):
+# haproxy fronts all API servers on :8443, and keepalived floats a shared VIP so the
+# control_plane_endpoint (VIP:8443) survives losing the node currently holding it. This keeps
+# the "3 VMs = control plane" topology self-contained - no separate LB VM. Production would use
+# a redundant external load balancer; here the VIP + per-node haproxy is the balanced-fidelity
+# stand-in (a single VIP holder is still a brief failover point, noted in docs).
+
+- name: Install haproxy + keepalived
+  ansible.builtin.apt:
+    name:
+      - haproxy
+      - keepalived
+      - psmisc          # provides killall, used by keepalived's health check
+    state: present
+    update_cache: true
+
+- name: Template the haproxy config (balances :8443 across all API servers)
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    mode: '0644'
+  notify: restart haproxy
+
+- name: Template the keepalived config (floats the control-plane VIP)
+  ansible.builtin.template:
+    src: keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+    mode: '0644'
+  notify: restart keepalived
+
+- name: Enable and start haproxy
+  ansible.builtin.systemd:
+    name: haproxy
+    enabled: true
+    state: started
+
+- name: Enable and start keepalived
+  ansible.builtin.systemd:
+    name: keepalived
+    enabled: true
+    state: started

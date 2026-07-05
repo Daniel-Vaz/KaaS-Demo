@@ -1,0 +1,23 @@
+---
+# Join an additional control-plane node to an HA cluster (stacked etcd). `join_command` is the
+# control-plane join command built on the first control plane (worker join + --control-plane +
+# --certificate-key), passed as a play var. Idempotent: skipped once this node has joined.
+
+- name: Check whether this control plane has already joined
+  ansible.builtin.stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: kubelet_conf
+
+- name: kubeadm join (control plane)
+  # --patches applies the controlplane_audit role's kube-apiserver patch so this joining control
+  # plane's apiserver gets the same audit config as the first one (each apiserver audits itself).
+  # --node-name pins the k8s node name to inventory_hostname regardless of the guest OS hostname -
+  # see the matching note in roles/controlplane/tasks/main.yml.
+  ansible.builtin.command: >
+    {{ join_command }}
+    --apiserver-advertise-address {{ ansible_host | default(ansible_default_ipv4.address) }}
+    --node-name {{ inventory_hostname }}
+    --patches /etc/kubernetes/patches
+  when: not kubelet_conf.stat.exists
+  register: cp_join
+  changed_when: "'This node has joined the cluster' in cp_join.stdout"

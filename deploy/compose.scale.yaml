@@ -1,0 +1,133 @@
+# Horizontally-scaled bring-up: several replicas of web, api and worker (and a second exec agent),
+# layered on compose.yaml + compose.real.yaml.
+#
+#   make up-scale                                   # 2 of each, the default
+#   make up-scale WEB=3 API=3 WORKER=4              # or pick your own
+#
+# Replica counts come from the per-service `scale:` key below, not from `--scale` flags: podman-
+# compose accepts only ONE --scale per invocation, and passing it silently forces every OTHER
+# service back to a single replica. The counts interpolate from the environment, which is what the
+# WEB/API/WORKER variables on the make target set.
+#
+# What makes each tier safe to replicate - the reasoning, not just the knobs:
+#
+#   web     Stateless nginx. It re-resolves the `api` upstream per request (deploy/nginx.conf), so
+#           it spreads load over api replicas and follows them as they change.
+#   api     Stateless HTTP: signed-cookie sessions, Postgres-backed event stream (LISTEN/NOTIFY, so
+#           an SSE or WebSocket client on ANY replica sees the worker's events), and admission
+#           (quota + node-network IPAM) serialized platform-wide by a Postgres advisory lock.
+#   worker  Reconcile work is claimed from River's durable queue, which is unique-by-cluster: at
+#           most one job per cluster runs anywhere, no matter how many workers. The singleton
+#           loops (orphan GC, metrics, health) run ONLY in the replica holding the leader lease -
+#           see internal/reconcile/leader.go. Workers publish no ports, so host networking is not
+#           in the way; the SOCKS tunnel to a remote KVM host is shared, not re-opened, by the
+#           replicas that come up after the first (internal/kvmhost).
+#   shell   The exec agents are interchangeable - each request carries its own kubeconfig and no
+#           session outlives its connection - so the API round-robins over the list in
+#           KAAS_SHELL_AGENT_ADDR and fails over if one is down (internal/execagent).
+#   nodessh The node-ssh sandboxes are interchangeable the same way (no cross-session state), so the
+#           API round-robins KAAS_NODE_SSH_AGENT_ADDR over them and fails over identically. Separate
+#           tier from `shell` because it holds the VM key and runs no PTY - see internal/nodessh.
+#
+# The one thing that is NOT replicated is Postgres: it is the single source of truth, and running a
+# real HA Postgres is out of scope for the demo (docs/architecture.md lists platform HA as
+# deliberately stubbed).
+name: kaas-demo
+
+services:
+  # The load balancer that replaces the fixed host ports the single-replica overlay publishes: it
+  # is the only container holding :8080/:8081, and it fans out to the web/api replicas by DNS
+  # (see deploy/nginx-lb.conf). Front door and direct-API port keep the addresses they always had,
+  # so nothing downstream - the browser, curl, scripts/teardown-clusters.sh - changes.
+  lb:
+    build:
+      context: ..
+      dockerfile: deploy/Containerfile.lb
+    ports:
+      - "8080:80"   # the portal (→ web replicas)
+      - "8081:81"   # the raw JSON+SSE API (→ api replicas)
+    depends_on:
+      - web
+      - api
+    networks: [kaas]
+
+  web:
+    scale: ${WEB:-2}
+
+  api:
+    scale: ${API:-2}
+    environment:
+      # Both exec agents, comma-separated: the API spreads terminal sessions and kubectl calls over
+      # them and fails over when one is unreachable (internal/execagent).
+      - KAAS_SHELL_AGENT_ADDR=host.containers.internal:8082,host.containers.internal:8083
+      # Both node-ssh sandboxes, likewise. Separate list - separate tier (:8084/:8085).
+      - KAAS_NODE_SSH_AGENT_ADDR=host.containers.internal:8084,host.containers.internal:8085
+
+  worker:
+    # Safe to replicate: River hands each cluster's reconcile job to exactly one worker, and only
+    # the leader runs the GC/metrics/health sweeps (see the note at the top of this file).
+    scale: ${WORKER:-2}
+
+  # A second exec-agent sandbox. It is a distinct SERVICE rather than `--scale shell=2` because the
+  # sandbox is host-networked (the only route to the cluster VM subnets - docs/networking.md), so
+  # each instance needs its own port on the shared host loopback; replicas of one service would all
+  # try to bind :8082. Everything else about it is identical to `shell` - same unprivileged,
+  # secret-free image (deploy/Containerfile.shell). On a multi-host deployment this is instead one
+  # agent per host, all listed in KAAS_SHELL_AGENT_ADDR above.
+  shell2:
+    build:
+      context: ..
+      dockerfile: deploy/Containerfile.shell
+    network_mode: host
+    environment:
+      - KAAS_SHELL_LISTEN=:8083
+      - KAAS_WORK_DIR=/work
+      - KAAS_SHELL_TOKEN=${KAAS_SHELL_TOKEN:-}
+      - KAAS_KVM_HOST=${KAAS_KVM_HOST:-}
+      - KAAS_KVM_SOCKS_ADDR=${KAAS_KVM_SOCKS_ADDR:-}
+    user: "65534:65534"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 512m
+    tmpfs:
+      - /work:rw,size=128m,mode=1777
+      - /tmp:rw,size=32m,mode=1777
+
+  # A second node-ssh sandbox, on :8085 - a distinct SERVICE rather than `--scale nodessh=2` for the
+  # same reason as shell2: host networking means each instance needs its own host-loopback port.
+  # Identical to `nodessh` in every other way, including the two key mounts (deploy/compose.real.yaml).
+  nodessh2:
+    build:
+      context: ..
+      dockerfile: deploy/Containerfile.nodessh
+    network_mode: host
+    environment:
+      - KAAS_NODE_SSH_LISTEN=:8085
+      - KAAS_WORK_DIR=/work
+      - KAAS_NODE_SSH_TOKEN=${KAAS_NODE_SSH_TOKEN:-}
+      - KAAS_SSH_USER=${KAAS_SSH_USER:-kaas}
+      - KAAS_SSH_PRIVATE_KEY_FILE=/keys/id
+      - KAAS_KVM_HOST=${KAAS_KVM_HOST:-}
+      - KAAS_KVM_SSH_USER=${KAAS_KVM_SSH_USER:-root}
+      - KAAS_KVM_SSH_PORT=${KAAS_KVM_SSH_PORT:-22}
+      - KAAS_KVM_SSH_KEY_FILE=/keys/kvm
+      - KAAS_KVM_KNOWN_HOSTS_FILE=${KAAS_KVM_KNOWN_HOSTS_FILE:+/keys/kvm_known_hosts}
+    volumes:
+      - ${KAAS_SSH_PRIVATE_KEY_FILE:-/dev/null}:/keys/id:ro
+      - ${KAAS_KVM_SSH_KEY_FILE:-/dev/null}:/keys/kvm:ro
+      - ${KAAS_KVM_KNOWN_HOSTS_FILE:-/dev/null}:/keys/kvm_known_hosts:ro
+    # Root, like the `nodessh` service - required to read the 0600 VM key (see compose.real.yaml).
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 512m
+    tmpfs:
+      - /work:rw,size=64m,mode=1777
+      - /tmp:rw,size=32m,mode=1777

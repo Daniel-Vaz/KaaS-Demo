@@ -1,0 +1,91 @@
+---
+# Rolling OS upgrade, control-plane step: join a freshly re-provisioned VM back as a control plane.
+# A surviving control plane ({{ admin_host }}) mints a fresh worker join command AND re-uploads the
+# control-plane certs to produce a certificate key (the one from `kubeadm init` expires ~2h), then
+# the replacement node ({{ target_node }}) runs `kubeadm join --control-plane`. Invoked by
+# internal/config/ansible.JoinControlPlane. Idempotent: the join is skipped once the node is in.
+#
+# For HA, this ALSO re-provisions the loadbalancer role (keepalived + haproxy) on the replacement
+# node - bootstrap.yml installs it at initial create, but a rolling replacement recreates the VM
+# from scratch, so without this the replaced node would never be able to hold the control-plane VIP
+# again. Rolled one node at a time, that erodes silently: after the LAST control-plane node is
+# replaced, no node anywhere runs keepalived, and the whole cluster becomes unreachable at
+# <VIP>:8443. vrrp_router_id/vrrp_password are deterministic from the cluster (same values
+# InitControlPlane used), so the replacement node's config matches its still-running peers.
+#
+# The replacement node was just (re)created: tofu's wait_for_lease only confirms a DHCP lease, not
+# that cloud-init has finished bringing up sshd, so connecting immediately can hit a transient
+# "Connection refused". wait_for_connection blocks until it genuinely accepts SSH before anything
+# else (including fact gathering, needed by the loadbalancer role) runs.
+#
+# The reconciler rolls one control plane per tick and must not start removing the NEXT one until
+# THIS one is genuinely serving - a `remove-controlplane.yml` run against a barely-joined admin_host
+# (kube-apiserver/etcd/CNI still settling) is exactly what produced transient TLS handshake timeouts
+# against etcd. The post_tasks wait means JoinControlPlane (Go) does not return until this node is
+# Ready, so the reconciler's next tick - and any admin_host it might pick - is safe to use.
+#
+# `controlplane_join` runs BEFORE `loadbalancer` is re-provisioned on the replacement node - not
+# after - so `kubeadm join --control-plane`'s one-shot, non-retrying dial to the VIP always lands on
+# a STABLE peer's already-warmed-up haproxy, never this node's own freshly (re)started one. The first
+# control plane always has the highest VRRP priority (see keepalived.conf.j2's `nopreempt`, which
+# stops it from preempting a healthy holder just because it technically outranks it) - but a
+# brand-new haproxy still needs a couple of health-check rounds before it'll route to anything, so
+# even with nopreempt this node must not be the one its own join depends on.
+
+- name: Mint a fresh control-plane join command on a surviving control plane
+  # admin_host / target_node are passed as extra-vars at run time; the defaults keep
+  # `ansible-playbook --syntax-check` resolvable without them.
+  hosts: "{{ admin_host | default('control_plane') }}"
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Create a worker join command
+      ansible.builtin.command: kubeadm token create --print-join-command
+      register: join_cmd
+      changed_when: false
+
+    - name: Re-upload control-plane certs to mint a certificate key
+      ansible.builtin.command: kubeadm init phase upload-certs --upload-certs
+      register: upload_certs
+      changed_when: false
+
+    - name: Build the control-plane join command
+      ansible.builtin.set_fact:
+        cp_join_cmd: "{{ join_cmd.stdout }} --control-plane --certificate-key {{ upload_certs.stdout_lines[-1] | trim }}"
+
+- name: Join the replacement control plane
+  hosts: "{{ target_node | default('control_plane') }}"
+  become: true
+  gather_facts: false
+  vars:
+    # Built by the admin_host play above; persists across plays as a host fact.
+    join_command: "{{ hostvars[admin_host]['cp_join_cmd'] | default('') }}"
+  pre_tasks:
+    - name: Wait for SSH (the node may have just been (re)created)
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: 300
+    - name: Gather facts (needed by the loadbalancer role)
+      ansible.builtin.setup:
+  roles:
+    - common
+    # The replacement VM is built from the golden image and has never run kubeadm, so its
+    # /etc/kubernetes/patches is empty - without these two roles the `--patches` dir
+    # `controlplane_join` points kubeadm at contributes nothing, and the rebuilt node comes back
+    # with an unaudited apiserver and an untuned etcd. Rolled one node at a time, that erodes
+    # silently: after the last control plane is replaced, no member anywhere is tuned. Same class
+    # of bug as the `loadbalancer` role below, which is here for exactly that reason.
+    - controlplane_audit
+    - controlplane_etcd
+    - controlplane_join
+    - role: loadbalancer
+      when: ha | default(false) | bool
+  post_tasks:
+    - name: Wait for this control plane to report Ready
+      # super-admin.conf, not admin.conf: this node just ran `kubeadm join --control-plane`, before
+      # admin.conf's kubeadm:cluster-admins ClusterRoleBinding has necessarily propagated through the
+      # RBAC authorizer's cache - see docs/configuration-management.md.
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/super-admin.conf wait node/{{ target_node }}
+        --for=condition=Ready --timeout=300s
+      changed_when: false

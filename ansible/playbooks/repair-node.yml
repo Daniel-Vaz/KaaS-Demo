@@ -1,0 +1,20 @@
+---
+# Automatic node repair, cheapest rung: restart kubelet on one NotReady node. Invoked by
+# internal/config/ansible.RestartKubelet with extra-var target_node.
+#
+# Runs against the NODE, not the control plane - unlike remove-worker.yml, which deliberately works
+# by node name from a control plane so it functions on an unreachable VM. The distinction is the
+# point: this rung is only chosen when the node is reachable but not serving. A node that cannot be
+# reached over SSH fails here, the reconciler records the failed attempt, and the ladder escalates to
+# replacing it (see internal/domain.RepairPolicy).
+#
+# gather_facts is on: unlike most plays here this one is diagnosing a sick node, and failing at fact
+# gathering is itself an answer - it means the node is not reachable and the cheap rung cannot apply.
+- name: Repair a node's kubelet
+  # The default is never used in practice (the Go side always passes target_node); it is here so the
+  # play is resolvable under `ansible-playbook --syntax-check`, like every other targeted play here.
+  hosts: "{{ target_node | default('workers') }}"
+  become: true
+  gather_facts: true
+  roles:
+    - node_repair

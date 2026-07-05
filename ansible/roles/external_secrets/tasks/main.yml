@@ -1,0 +1,57 @@
+---
+# Apply the cluster's ClusterSecretStore on the first control plane, with admin.conf. Idempotent:
+# `kubectl apply` of a fixed manifest, so re-runs converge. Runs post-Ready, so admin.conf suffices
+# (like default_gateway).
+#
+# The store authenticates to the central Vault with the JWT auth method the platform configured for
+# THIS cluster (auth mount jwt-<cluster-id>, role kaas-eso-<cluster-id>, bound to the cluster's read
+# policy). ESO projects the external-secrets controller ServiceAccount's token - signed by the
+# cluster's own SA issuer, which Vault validates offline against the public keys the platform copied
+# in - and Vault hands back a token scoped to read-only on kaas/clusters/<cluster-id>/*. So a tenant's
+# secrets flow Vault → ESO → Kubernetes Secret with no static credential anywhere and no cross-cluster
+# reach: the store cannot read any other cluster's subtree.
+#
+# Vars from Go (EnsureExternalSecrets): vault_addr, vault_mount, vault_cluster_prefix, vault_auth_mount,
+# vault_auth_role, eso_namespace.
+
+- name: Refuse to proceed without a Vault address
+  # The reconciler runs this only in real config mode, where the worker has a Vault address. A missing
+  # one would produce a store that can never connect, so fail loudly rather than apply a broken CR.
+  ansible.builtin.assert:
+    that:
+      - vault_addr is defined
+      - vault_addr | length > 0
+    fail_msg: "vault_addr is required to wire the External Secrets Operator to Vault"
+
+- name: Stage the ClusterSecretStore manifest
+  ansible.builtin.copy:
+    dest: /etc/kubernetes/kaas-external-secrets.yaml
+    mode: '0600'
+    content: |
+      apiVersion: external-secrets.io/v1
+      kind: ClusterSecretStore
+      metadata:
+        name: kaas-vault
+      spec:
+        provider:
+          vault:
+            server: "{{ vault_addr }}"
+            # The KV v2 mount; ESO scopes reads to this cluster's subtree via the ExternalSecret keys
+            # (clusters/<id>/<namespace>/<name>) and Vault's read policy enforces the boundary.
+            path: "{{ vault_mount }}"
+            version: v2
+            auth:
+              jwt:
+                path: "{{ vault_auth_mount }}"
+                role: "{{ vault_auth_role }}"
+                kubernetesServiceAccountToken:
+                  serviceAccountRef:
+                    name: external-secrets
+                    namespace: "{{ eso_namespace }}"
+                  audiences:
+                    - vault
+
+- name: Apply the ClusterSecretStore
+  ansible.builtin.command: kubectl --kubeconfig /etc/kubernetes/admin.conf apply -f /etc/kubernetes/kaas-external-secrets.yaml
+  register: eso_apply
+  changed_when: "'created' in eso_apply.stdout or 'configured' in eso_apply.stdout"

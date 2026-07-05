@@ -1,0 +1,186 @@
+{{- if eq (include "kaas.real" .) "true" }}
+{{- $fullname := include "kaas.fullname" . -}}
+{{- $remote := eq .Values.kvm.mode "remote" -}}
+{{/*
+The cluster-shell exec agent: the sandbox a user's Terminal session runs in, and the executor behind
+the Workloads / Monitoring / Security pages' kubectl calls.
+
+Two properties matter here, and they pull in the same direction:
+
+  SCALABLE - it keeps nothing between requests. Every request carries its own kubeconfig, and a PTY
+    session lives and dies with its WebSocket. So any replica can serve any request, no sticky
+    routing is needed, and the API just points at this Service and lets Kubernetes spread the load.
+
+  UNPRIVILEGED - a user can break kubectl into arbitrary bash in here, so there must be nothing worth
+    stealing: bash + kubectl only (no OpenTofu/Ansible/Helm, no libvirt client), non-root, all
+    capabilities dropped, read-only rootfs, and NO platform secrets - no master key, no database URL,
+    no hypervisor key. It holds only the shared bearer token the API authenticates with.
+
+That second property is why, with a remote hypervisor, this pod does NOT open its own SSH tunnel the
+way the worker does: opening one would mean mounting the hypervisor's private key into the very
+container users get a shell in. Instead it routes kubectl through the dedicated tunnel Service
+(socks.yaml), where the key lives in a pod nobody can shell into.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-shell
+  labels:
+    {{- include "kaas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: shell
+spec:
+  {{- if not .Values.shell.autoscaling.enabled }}
+  replicas: {{ .Values.shell.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "kaas.selectorLabels" (dict "ctx" . "component" "shell") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kaas.labels" . | nindent 8 }}
+        app.kubernetes.io/component: shell
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if not $remote }}
+      # local mode: the cluster VMs are on the node, so the agent needs the node's network to reach
+      # them. Each pod then binds :8082 on its node - hence one pod per node (anti-affinity below).
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
+      # Let an open terminal drain rather than being cut mid-keystroke.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+      containers:
+        - name: shell-agent
+          image: {{ include "kaas.image" (dict "ctx" . "component" "shell") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: agent
+              containerPort: 8082
+          env:
+            - name: KAAS_SHELL_LISTEN
+              value: ":8082"
+            - name: KAAS_WORK_DIR
+              value: /work
+            # The ONLY secret this pod gets: the bearer token the API presents. Note what is absent -
+            # KAAS_SECRET_KEY, DATABASE_URL, any SSH key.
+            - name: KAAS_SHELL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kaas.secretName" . }}
+                  key: kaas-shell-token
+            {{- if $remote }}
+            # Where to reach cluster API servers: the shared tunnel Service. KAAS_KVM_HOST is set
+            # only so the agent knows a proxy is in play - it carries no credential for that host and
+            # cannot dial it directly.
+            - name: KAAS_KVM_HOST
+              value: {{ .Values.kvm.host | quote }}
+            - name: KAAS_KVM_SOCKS_ADDR
+              value: {{ include "kaas.shellSocksAddr" . | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.shell.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            # The only writable path: per-session kubeconfig, HOME and kubectl cache. Nothing here
+            # outlives the pod.
+            - name: work
+              mountPath: /work
+      volumes:
+        - name: work
+          emptyDir:
+            sizeLimit: {{ .Values.shell.workDirSizeLimit }}
+      {{- if $remote }}
+      {{- with .Values.shell.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.shell.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.shell.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- else }}
+      nodeSelector:
+        {{- toYaml .Values.kvm.local.nodeSelector | nindent 8 }}
+      {{- with .Values.kvm.local.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # host-networked pods all want :8082 on their node, so at most one per node. This caps the
+      # replica count at the number of libvirt nodes - the price of local mode.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "kaas.selectorLabels" (dict "ctx" . "component" "shell") | nindent 18 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-shell
+  labels:
+    {{- include "kaas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: shell
+spec:
+  type: ClusterIP
+  ports:
+    - name: agent
+      port: 8082
+      targetPort: agent
+  selector:
+    {{- include "kaas.selectorLabels" (dict "ctx" . "component" "shell") | nindent 4 }}
+{{- if .Values.shell.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $fullname }}-shell
+  labels:
+    {{- include "kaas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: shell
+spec:
+  minAvailable: {{ .Values.shell.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "kaas.selectorLabels" (dict "ctx" . "component" "shell") | nindent 6 }}
+{{- end }}
+{{- if .Values.shell.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $fullname }}-shell
+  labels:
+    {{- include "kaas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: shell
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $fullname }}-shell
+  minReplicas: {{ .Values.shell.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.shell.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.shell.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}

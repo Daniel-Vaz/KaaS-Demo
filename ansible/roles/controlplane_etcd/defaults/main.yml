@@ -1,0 +1,14 @@
+---
+# Defaults for the etcd backend tuning below. internal/config/ansible passes both as extra-vars
+# (from KAAS_ETCD_QUOTA_BYTES / KAAS_ETCD_COMPACTION_RETENTION); these keep the role - and
+# `ansible-playbook --syntax-check` - resolvable on its own.
+
+# etcd's backend-store quota. Reaching it arms the NOSPACE alarm and makes the WHOLE cluster
+# read-only until someone defragments and disarms it, so the default 2GiB is the cliff this role
+# exists to move. 8GiB.
+etcd_quota_backend_bytes: 8589934592
+
+# etcd's own periodic auto-compaction. The apiserver already compacts every 5m
+# (--etcd-compaction-interval), but that stops the moment the apiserver is unhealthy - which is
+# precisely when the keyspace grows. This is the independent backstop.
+etcd_auto_compaction_retention: 1h

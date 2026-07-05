@@ -1,0 +1,78 @@
+---
+# Cluster-wide half of control_plane_metrics: kube-proxy's metrics ConfigMap, invoked from
+# control-plane-metrics.yml's second play (hosts: control_plane[0] - NOT control_plane, and no
+# serial). Deliberately its own play rather than `run_once: true` tasks tacked onto the per-node
+# play: `run_once` combined with `serial` is a well-known Ansible gotcha - with serial:1 (required by
+# per_node.yml's one-etcd-member-at-a-time restart) each host becomes its OWN batch, and run_once
+# fires once per batch, not once for the whole play. So a run_once task in that play actually runs on
+# EVERY control plane, not just the first - and every use of super-admin.conf here would then hit a
+# node that doesn't have it: only the node that ran the ORIGINAL `kubeadm init` ever gets
+# super-admin.conf, never a node that joined via `kubeadm join --control-plane` (see
+# docs/configuration-management.md). Structural host-scoping (a real, separate play targeting
+# control_plane[0] specifically) makes that failure mode impossible instead of relying on `run_once`
+# to merely reduce its frequency.
+#
+# kube-proxy's ConfigMap defaults `metricsBindAddress` to loopback-only, the same reason
+# kube-scheduler/kube-controller-manager need per_node.yml's bind-address edit - but this is a single
+# cluster-wide object, patched once, not per node.
+
+- name: Read the live kube-proxy config.conf
+  # Uses super-admin.conf, not admin.conf: this role runs right after add-ons install, early enough
+  # in a fresh cluster's life that admin.conf's kubeadm:cluster-admins ClusterRoleBinding can still be
+  # propagating through the RBAC authorizer's cache, transiently Forbidding this read. super-admin.conf
+  # bypasses RBAC (system:masters) so it isn't subject to that race - see docs/configuration-management.md.
+  # argv (not a plain command string): ansible's command module shlex-splits a plain string on the
+  # control node, which silently eats the backslash in `config\.conf` before kubectl ever sees it -
+  # turning the escaped literal-dot key into an unescaped (and non-existent) nested path, so the
+  # read comes back empty and the next task then "patches" the ConfigMap to that empty string,
+  # crash-looping kube-proxy. argv passes each arg through verbatim, no shell/shlex involved.
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - --kubeconfig=/etc/kubernetes/super-admin.conf
+      - -n
+      - kube-system
+      - get
+      - configmap
+      - kube-proxy
+      - -o
+      - jsonpath={.data.config\.conf}
+  register: kube_proxy_config
+  changed_when: false
+
+- name: Refuse to proceed if that didn't come back looking like a real KubeProxyConfiguration
+  # Guards the exact failure mode above: a silently-empty (or otherwise mangled) read must never
+  # reach the patch step below, which would happily write that broken content straight back and
+  # crash-loop every kube-proxy pod in the cluster.
+  ansible.builtin.assert:
+    that:
+      - kube_proxy_config.stdout is search('kind:\s*KubeProxyConfiguration')
+    fail_msg: "kube-proxy config.conf read back empty/malformed - refusing to patch it back"
+
+- name: Compute a patched config.conf with metricsBindAddress on 0.0.0.0
+  ansible.builtin.set_fact:
+    kube_proxy_config_patched: >-
+      {{ kube_proxy_config.stdout | regex_replace('(?m)^metricsBindAddress:.*$', 'metricsBindAddress: "0.0.0.0:10249"') }}
+
+- name: Apply the patched kube-proxy config.conf
+  # A merge patch touches only data["config.conf"], leaving kubeconfig.conf and any other key intact.
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - --kubeconfig=/etc/kubernetes/super-admin.conf
+      - -n
+      - kube-system
+      - patch
+      - configmap
+      - kube-proxy
+      - --type=merge
+      - -p
+      - "{{ {'data': {'config.conf': kube_proxy_config_patched}} | to_json }}"
+  register: kube_proxy_patch
+  changed_when: "'(no change)' not in kube_proxy_patch.stdout"
+
+- name: Roll out kube-proxy so it picks up the new metrics bind address
+  ansible.builtin.command: >
+    kubectl --kubeconfig /etc/kubernetes/super-admin.conf -n kube-system
+    rollout restart daemonset/kube-proxy
+  when: kube_proxy_patch.changed

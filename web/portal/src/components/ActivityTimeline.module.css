@@ -1,0 +1,41 @@
+.log {
+  border: 1px solid light-dark(var(--mantine-color-gray-3), var(--mantine-color-dark-4));
+  border-radius: var(--mantine-radius-md);
+  background: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-8));
+  padding: 8px 10px;
+  font-family: var(--mantine-font-family-monospace);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.line {
+  display: grid;
+  grid-template-columns: 62px 84px 1fr;
+  gap: 8px;
+  align-items: baseline;
+  padding: 1px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ts {
+  color: var(--mantine-color-dimmed);
+  font-variant-numeric: tabular-nums;
+}
+
+.src {
+  justify-self: start;
+}
+
+.msg {
+  color: light-dark(var(--mantine-color-gray-8), var(--mantine-color-gray-3));
+}
+
+.warn {
+  color: var(--mantine-color-yellow-6);
+}
+
+.error {
+  color: var(--mantine-color-red-6);
+  font-weight: 600;
+}

@@ -1,0 +1,18 @@
+---
+# Bake the node software into a golden image. Runs the SAME `common` role used at
+# provision time - so at cluster-create time `common` re-runs as a near no-op - the
+# `longhorn_prereqs` role (baked HERE only, so provisioning doesn't pay for the Longhorn add-on's
+# node prerequisites - see that role), plus pre-pulls the control-plane images so `kubeadm init` is
+# fast. Invoked by Packer's ansible provisioner (all three providers) with extra-vars k8s_version +
+# k8s_minor (see packer/ubuntu-k8s.pkr.hcl and packer/{vsphere,proxmox}/ubuntu-k8s.pkr.hcl).
+- name: Build golden image
+  hosts: all
+  become: true
+  gather_facts: true
+  roles:
+    - common
+    - longhorn_prereqs
+  tasks:
+    - name: Pre-pull kubeadm control-plane images
+      ansible.builtin.command: "kubeadm config images pull --kubernetes-version {{ k8s_version }}"
+      changed_when: true

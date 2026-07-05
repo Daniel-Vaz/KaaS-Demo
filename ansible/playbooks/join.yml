@@ -1,0 +1,60 @@
+---
+# Join worker nodes. Mints a FRESH join command on the control plane each run (kubeadm
+# bootstrap tokens expire ~24h after init), then joins any worker not already in the
+# cluster - so this one playbook serves both initial bring-up and later scale-ups.
+# Idempotent: the worker role skips nodes that have already joined.
+#
+# The "Join workers" play may target a VM tofu JUST created (a rolling replacement runs Ansible
+# right after `apply`): tofu's wait_for_lease only confirms a DHCP lease, not that cloud-init has
+# finished bringing up sshd, so connecting immediately can hit a transient "Connection refused".
+# wait_for_connection blocks until the node genuinely accepts SSH before anything else runs.
+- name: Mint a worker join command on the control plane
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: kubeadm token create --print-join-command
+      ansible.builtin.command: kubeadm token create --print-join-command
+      register: join_cmd
+      changed_when: false
+
+- name: Join workers
+  hosts: workers
+  become: true
+  gather_facts: false
+  vars:
+    join_command: "{{ hostvars[groups['control_plane'][0]]['join_cmd'].stdout }}"
+  pre_tasks:
+    - name: Wait for SSH (the node may have just been (re)created)
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: 300
+  roles:
+    - common
+    - worker
+
+# The reconciler rolls one node per tick and must not start on the NEXT node until this one is
+# genuinely serving - otherwise (during a rolling upgrade) it can drain/remove the next node while
+# this one's kubelet/CNI is still settling. Waiting for Ready here means JoinWorkers (Go) does not
+# return until every worker it just joined is actually Ready, so the reconciler's next tick is safe.
+#
+# wait_ready defaults to true, EXCEPT at initial cluster bring-up: a node cannot report Ready until
+# a CNI is installed, and the very first JoinWorkers call runs before InstallCNI (the next phase) -
+# waiting there would block for the full timeout on every fresh cluster with workers. Every other
+# caller (scale-up, a worker roll during an upgrade) only runs once the cluster has been Ready at
+# least once, so the CNI is already there. See internal/config/ansible.JoinWorkers.
+- name: Wait for workers to report Ready
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Wait for each worker node to become Ready
+      # super-admin.conf, not admin.conf: this can run right after initial cluster bring-up, before
+      # admin.conf's kubeadm:cluster-admins ClusterRoleBinding has propagated through the RBAC
+      # authorizer's cache - see docs/configuration-management.md.
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/super-admin.conf wait node/{{ item }}
+        --for=condition=Ready --timeout=300s
+      loop: "{{ groups['workers'] }}"
+      when: wait_ready | default(true) | bool
+      changed_when: false

@@ -1,0 +1,186 @@
+# Common base: the web portal (front door at http://localhost:8080), the control-plane API, and
+# Postgres. The API is the JSON+SSE HTTP surface and NEVER touches KVM - it always runs the FAKE
+# providers. The `web` container serves the built SPA and reverse-proxies /api/* to the API. Three
+# ways to use it:
+#
+#   make up          # + compose.real.yaml + compose.ports.yaml: a host-networked worker does the
+#                    #   REAL VMs (default)
+#   make up-fake     # + compose.ports.yaml: the API reconciles in-process with fake providers
+#   make up-scale    # + compose.real.yaml + compose.scale.yaml: several replicas of web/api/worker
+#                    #   behind a load balancer (see compose.scale.yaml)
+#
+# NOTE: no host ports are published HERE. Publishing a fixed host port pins a service to one
+# replica (two containers cannot both hold :8080), so the port mappings live in the
+# compose.ports.yaml overlay, which the single-replica targets add and the scaled one replaces with
+# a load balancer. Compose merges list fields by appending, so a published port could not have been
+# removed by an overlay - it had to come out of the base.
+#
+# Provider vars are hardcoded fake here on purpose - the API must not pick up KAAS_PROVISIONER
+# etc. from a .env meant for the worker (see deploy/compose.real.yaml).
+name: kaas-demo
+
+services:
+  # The portal: nginx serving the React/Mantine SPA + reverse-proxying /api/* to `api` (SSE-aware,
+  # see deploy/nginx.conf). This is the browser front door on :8080. Stateless - scale it freely;
+  # it re-resolves `api` per request, so it also follows api replicas as they come and go.
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Containerfile.web
+    depends_on:
+      - api
+    networks: [kaas]
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Containerfile.api
+    environment:
+      - KAAS_ADDR=:8080
+      - KAAS_SECRET_KEY=${KAAS_SECRET_KEY:-dev-only-change-me}
+      - DATABASE_URL=postgres://kaas:kaas@postgres:5432/kaas?sslmode=disable
+      - KAAS_MIGRATIONS_DIR=/migrations
+      # If the build host sits behind a corporate proxy, podman/buildah bakes http_proxy/HTTP_PROXY
+      # into the image automatically. Go's net/http (and the coder/websocket dials to the exec
+      # agents below) then honors it for EVERY outbound call, including host.containers.internal -
+      # a Podman-internal alias the corporate proxy has never heard of, so it answers with its own
+      # 502 instead of forwarding. NO_PROXY/no_proxy exempt it so those calls go direct.
+      - NO_PROXY=${NO_PROXY:-host.containers.internal,localhost,127.0.0.1}
+      - no_proxy=${no_proxy:-host.containers.internal,localhost,127.0.0.1}
+      - KAAS_PROVISIONER=fake
+      - KAAS_CONFIG=fake
+      - KAAS_ADDONS=fake
+      # Cluster shell: fake (in-process simulated kubectl). compose.real.yaml overrides this to
+      # `worker`, pointing the API at the host-networked worker's exec agent.
+      - KAAS_SHELL=fake
+      - KAAS_BUDGET_VCPU=${KAAS_BUDGET_VCPU:-16}
+      - KAAS_BUDGET_MEM_MB=${KAAS_BUDGET_MEM_MB:-24576}
+      - KAAS_BUDGET_DISK_GB=${KAAS_BUDGET_DISK_GB:-500}
+      # Turn per-user quota off: every account draws from each backend's full ceiling (the aggregate
+      # cap still prevents oversubscription). Admin page shows consumption instead of grant editors.
+      - KAAS_SHARED_QUOTA=${KAAS_SHARED_QUOTA:-false}
+      # Which infrastructures users may pick from, and - for the shared-network providers
+      # (vSphere, Proxmox) - the network shape and capacity cap ADMISSION needs (the API decides
+      # addresses and quota; it does not provision). vCenter/Proxmox/NetBox CREDENTIALS are
+      # deliberately absent here: they belong to the worker alone.
+      - KAAS_INFRA_PROVIDERS=${KAAS_INFRA_PROVIDERS:-kvm}
+      - KAAS_VSPHERE_NETWORK=${KAAS_VSPHERE_NETWORK:-}
+      - KAAS_VSPHERE_NET_MODE=${KAAS_VSPHERE_NET_MODE:-dhcp}
+      - KAAS_VSPHERE_NET_CIDR=${KAAS_VSPHERE_NET_CIDR:-}
+      - KAAS_VSPHERE_NET_GATEWAY=${KAAS_VSPHERE_NET_GATEWAY:-}
+      - KAAS_VSPHERE_NET_DNS=${KAAS_VSPHERE_NET_DNS:-}
+      - KAAS_VSPHERE_NET_RANGE=${KAAS_VSPHERE_NET_RANGE:-}
+      - KAAS_VSPHERE_BUDGET_VCPU=${KAAS_VSPHERE_BUDGET_VCPU:-64}
+      - KAAS_VSPHERE_BUDGET_MEM_MB=${KAAS_VSPHERE_BUDGET_MEM_MB:-131072}
+      - KAAS_VSPHERE_BUDGET_DISK_GB=${KAAS_VSPHERE_BUDGET_DISK_GB:-4096}
+      - KAAS_PROXMOX_NET_BRIDGE=${KAAS_PROXMOX_NET_BRIDGE:-}
+      - KAAS_PROXMOX_NET_MODE=${KAAS_PROXMOX_NET_MODE:-dhcp}
+      - KAAS_PROXMOX_NET_CIDR=${KAAS_PROXMOX_NET_CIDR:-}
+      - KAAS_PROXMOX_NET_GATEWAY=${KAAS_PROXMOX_NET_GATEWAY:-}
+      - KAAS_PROXMOX_NET_DNS=${KAAS_PROXMOX_NET_DNS:-}
+      - KAAS_PROXMOX_NET_RANGE=${KAAS_PROXMOX_NET_RANGE:-}
+      - KAAS_PROXMOX_BUDGET_VCPU=${KAAS_PROXMOX_BUDGET_VCPU:-64}
+      - KAAS_PROXMOX_BUDGET_MEM_MB=${KAAS_PROXMOX_BUDGET_MEM_MB:-131072}
+      - KAAS_PROXMOX_BUDGET_DISK_GB=${KAAS_PROXMOX_BUDGET_DISK_GB:-4096}
+      # Site DNS - the NAMING half only. Admission derives each cluster's domain
+      # ("<name>.<base>", apps under "<label>.<name>.<base>") from these and stores it on the
+      # cluster row. The server address and the credential that writes the zone are the worker's
+      # alone (compose.real.yaml), like every other provisioning secret. Unset = no cluster DNS.
+      - KAAS_DNS_BASE_DOMAIN=${KAAS_DNS_BASE_DOMAIN:-}
+      - KAAS_DNS_APPS_LABEL=${KAAS_DNS_APPS_LABEL:-apps}
+      # HashiCorp Vault (internal/vault) - the platform's secret store, deployed as the `vault` service
+      # below. In up-fake the API IS the reconciler, so it would also provision Vault (paths, policies,
+      # identity) - but that is the one provisioning seam whose address/token come from the shared .env,
+      # and a .env aimed at real infra (KAAS_VAULT_ADDR at a tunnelled external Vault) would wedge the
+      # portal demo: reconcileVaultWiring fails every tick and clusters loop in InstallingAddons. So,
+      # like KAAS_PROVISIONER/KAAS_CONFIG/KAAS_ADDONS above, fake mode defaults this seam to fake
+      # (in-memory, no Vault needed). compose.real.yaml re-asserts KAAS_VAULT=real for the real API
+      # (the minter token for the "View in Vault" handoff); the worker holds the management token there.
+      # Set KAAS_VAULT=real to exercise the bundled dev Vault container from up-fake instead. The auth
+      # backend Vault is configured with follows KAAS_AUTH above (local → userpass, ldap → the directory).
+      - KAAS_VAULT=${KAAS_VAULT:-fake}
+      - KAAS_VAULT_ADDR=${KAAS_VAULT_ADDR:-http://vault:8200}
+      - KAAS_VAULT_TOKEN=${KAAS_VAULT_TOKEN:-kaas-root-dev}
+      - KAAS_VAULT_MOUNT=${KAAS_VAULT_MOUNT:-kaas}
+      # Browser-facing Vault UI base (published on the host by compose.ports.yaml), used to build the
+      # "View in Vault" deep-link - never used to reach the API.
+      - KAAS_VAULT_UI_URL=${KAAS_VAULT_UI_URL:-http://localhost:8200}
+      # Seeded admin account (internal/app.ensureAdmin) - teardown-clusters.sh logs in as this
+      # user to list/delete every tenant's clusters before `make down` stops the containers.
+      # Under KAAS_AUTH=ldap this stays the BREAK-GLASS account: it is the one login that works
+      # when the domain controllers don't, and the directory can never claim its username.
+      - KAAS_ADMIN_USERNAME=${KAAS_ADMIN_USERNAME:-admin}
+      - KAAS_ADMIN_PASSWORD=${KAAS_ADMIN_PASSWORD:-admin}
+      # Authentication (internal/authn). Two orthogonal axes, like KAAS_INFRA_PROVIDERS vs
+      # KAAS_PROVISIONER:
+      #   KAAS_AUTH=local|ldap  the mechanism - authenticate against a directory at all?
+      #   KAAS_LDAP=fake|real   the seam - a real DC, or the in-memory fake
+      # `KAAS_AUTH=ldap KAAS_LDAP=fake` demos the whole AD flow (group seeding, JIT provisioning,
+      # membership sync) with no domain controller: it validates the real mapping rules below and
+      # synthesizes a user per rule. Only the API gets any of this - the worker never authenticates
+      # a user, so the bind password stays out of the privileged container entirely.
+      - KAAS_AUTH=${KAAS_AUTH:-local}
+      - KAAS_LDAP=${KAAS_LDAP:-real}
+      - KAAS_LDAP_CONFIG=/etc/kaas/ldap.yaml
+      - KAAS_LDAP_BIND_PASSWORD=${KAAS_LDAP_BIND_PASSWORD:-}
+      # Login throttle (internal/app/throttle.go). /auth/login is public, and with a directory every
+      # failed login is a real bad-password bind against a real AD account. The per-USERNAME limit
+      # must stay under the domain's own lockout threshold - the platform must never be what locks
+      # an account. The per-IP limit is far higher on purpose: an office shares one NAT egress
+      # address, so a low limit there would lock out the building rather than an attacker.
+      - KAAS_LDAP_MAX_FAILURES=${KAAS_LDAP_MAX_FAILURES:-3}
+      - KAAS_LDAP_MAX_IP_FAILURES=${KAAS_LDAP_MAX_IP_FAILURES:-30}
+      - KAAS_LDAP_THROTTLE_WINDOW=${KAAS_LDAP_THROTTLE_WINDOW:-5m}
+    volumes:
+      - ../migrations:/migrations:ro
+      # The mapping config. Defaults to the tracked example so compose always starts (KAAS_AUTH=local
+      # never reads it); point KAAS_LDAP_CONFIG_HOST at your own gitignored deploy/ldap.yaml to use a
+      # real directory. Read-only: nothing should ever write to it.
+      - ${KAAS_LDAP_CONFIG_HOST:-./ldap.example.yaml}:/etc/kaas/ldap.yaml:ro
+    # Reached as `api:8080` over the compose network (by `web`, and by the load balancer in
+    # compose.scale.yaml). Direct host access on :8081 - for curl and the teardown script - is
+    # published by compose.ports.yaml, or served by the load balancer when scaled.
+    #
+    # Stateless, so it scales horizontally: sessions are signed cookies (no server-side store), the
+    # event stream is Postgres LISTEN/NOTIFY (so an SSE client on ANY replica sees events emitted by
+    # the worker), and the read-then-write admission decisions (quota, node-network IPAM) are
+    # serialized across replicas by a Postgres advisory lock (see internal/store.Store.WithLock).
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [kaas]
+
+  # HashiCorp Vault - the platform's secret store (internal/vault). Dev mode: auto-unsealed, a fixed
+  # root token, in-memory storage. A DELIBERATE demo shortcut (production would run HA Vault with
+  # auto-unseal via a KMS, persistent storage and an audit device). The platform creates its own `kaas`
+  # KV mount and per-cluster paths/policies on top; it never touches Vault's dev `secret/` mount. On the
+  # kaas network as `vault:8200`; the UI is published on the host by compose.ports.yaml.
+  vault:
+    image: docker.io/hashicorp/vault:1.18
+    command: server -dev -dev-listen-address=0.0.0.0:8200
+    environment:
+      - VAULT_DEV_ROOT_TOKEN_ID=${KAAS_VAULT_TOKEN:-kaas-root-dev}
+    cap_add:
+      - IPC_LOCK
+    networks: [kaas]
+
+  postgres:
+    image: docker.io/library/postgres:16
+    environment:
+      - POSTGRES_USER=kaas
+      - POSTGRES_PASSWORD=kaas
+      - POSTGRES_DB=kaas
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kaas"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks: [kaas]
+
+networks:
+  kaas:
+
+volumes:
+  pgdata:

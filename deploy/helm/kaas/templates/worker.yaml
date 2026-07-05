@@ -1,0 +1,376 @@
+{{- $fullname := include "kaas.fullname" . -}}
+{{- $real := eq (include "kaas.real" .) "true" -}}
+{{- $remote := and $real (eq .Values.kvm.mode "remote") -}}
+{{/*
+The reconciler. The only component that provisions infrastructure: OpenTofu/libvirt for VMs, Ansible
+for kubeadm, Helm for add-ons, kubectl for the metrics/health sweeps.
+
+Replicas are safe, and that is not an accident of configuration:
+
+  * per-cluster work is CLAIMED from River's durable queue, whose job uniqueness is scoped to the
+    cluster id - at most one job per cluster is in flight platform-wide, however many workers run;
+  * the loops that are NOT per-cluster (orphan GC, metrics, health) run only in the replica holding a
+    Postgres advisory lease - GC destroys infrastructure, so running it once per replica would mean
+    two `tofu destroy` calls racing on one workspace;
+  * a worker that dies mid-phase simply has its job retried on another replica: every phase is
+    idempotent, which is the property the whole control loop already rests on.
+
+Reaching the hypervisor (kvm.mode):
+
+  remote - ordinary pods. OpenTofu dials libvirtd over qemu+ssh, Ansible hops through the KVM host
+    with a ProxyCommand, and each pod opens its OWN SSH SOCKS tunnel on its own loopback (pods have
+    separate network namespaces, so replicas never contend for the port).
+  local  - the VMs live on the node itself, so the pod needs hostNetwork and the libvirt socket as a
+    hostPath, and must be pinned to the node(s) that actually run libvirt. Kubernetes is poor at
+    this; it exists for a single-node/dev cluster.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-worker
+  labels:
+    {{- include "kaas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "kaas.selectorLabels" (dict "ctx" . "component" "worker") | nindent 6 }}
+  strategy:
+    # A reconcile phase can run for minutes (a `helm --wait` install, a multi-GB image upload).
+    # Recreate-style churn would SIGKILL those mid-flight, so roll one pod at a time and let River
+    # retry whatever was in flight on a surviving replica.
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+  template:
+    metadata:
+      labels:
+        {{- include "kaas.labels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if and $real (not $remote) }}
+      # local mode: the pod IS on the hypervisor - it needs the node's network to reach the VM
+      # bridges, and the node's libvirt socket.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
+      # A phase in flight deserves a chance to finish (or at least to fail cleanly) before SIGKILL.
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: worker
+          image: {{ include "kaas.image" (dict "ctx" . "component" "worker") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            {{- include "kaas.commonEnv" . | nindent 12 }}
+            {{- if $real }}
+            # The real backends - this is the only component that runs any of them.
+            - name: KAAS_PROVISIONER
+              value: tofu
+            - name: KAAS_CONFIG
+              value: ansible
+            - name: KAAS_ADDONS
+              value: helm
+            - name: KAAS_ADDON_VALUES
+              value: helm
+            # Read-only telemetry: it must run HERE, because this is the only component that can
+            # reach a cluster's API server. Anywhere else it would silently fall back to fake.
+            - name: KAAS_METRICS
+              value: kubectl
+            - name: KAAS_HEALTH
+              value: kubectl
+            {{- else }}
+            # providers=fake: the SAME reconcile loop, state machine, durable queue and leader
+            # election - only the backends behind the seams are simulated, so no hypervisor, no SSH
+            # keys and no VMs are involved.
+            - name: KAAS_PROVISIONER
+              value: fake
+            - name: KAAS_CONFIG
+              value: fake
+            - name: KAAS_ADDONS
+              value: fake
+            - name: KAAS_METRICS
+              value: fake
+            - name: KAAS_HEALTH
+              value: fake
+            {{- end }}
+            - name: KAAS_WORK_DIR
+              value: /work
+            - name: KAAS_RECONCILE_JOB_TIMEOUT
+              value: {{ .Values.config.reconcileJobTimeout | quote }}
+            {{- if $real }}
+            - name: KAAS_IMAGE_DIR
+              value: /srv/images
+            - name: KAAS_BASE_IMAGE
+              value: {{ .Values.worker.images.baseImage | quote }}
+            # The keypair for the CLUSTER VMs (not the hypervisor).
+            - name: KAAS_SSH_PUBLIC_KEY
+              value: {{ .Values.config.clusterSSH.publicKey | quote }}
+            - name: KAAS_SSH_PRIVATE_KEY_FILE
+              value: /keys/id
+            {{- if has "vsphere" .Values.infra.providers }}
+            # vSphere: placement + credentials, worker-only (the api Deployment only gets the
+            # network shape/budget, from kaas.commonEnv). Reached directly from this pod - no
+            # tunnel, no module-dir override (baked into the image at /infra/vsphere).
+            - name: KAAS_VSPHERE_URL
+              value: {{ .Values.infra.vsphere.url | quote }}
+            - name: KAAS_VSPHERE_USERNAME
+              value: {{ .Values.infra.vsphere.username | quote }}
+            - name: KAAS_VSPHERE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kaas.secretName" . }}
+                  key: vsphere-password
+            - name: KAAS_VSPHERE_INSECURE
+              value: {{ .Values.infra.vsphere.insecure | ternary "1" "0" | quote }}
+            - name: KAAS_VSPHERE_DATACENTER
+              value: {{ .Values.infra.vsphere.datacenter | quote }}
+            - name: KAAS_VSPHERE_CLUSTER
+              value: {{ .Values.infra.vsphere.cluster | quote }}
+            - name: KAAS_VSPHERE_DATASTORE
+              value: {{ .Values.infra.vsphere.datastore | quote }}
+            - name: KAAS_VSPHERE_FOLDER
+              value: {{ .Values.infra.vsphere.folder | quote }}
+            {{- end }}
+            {{- if has "proxmox" .Values.infra.providers }}
+            # Proxmox VE: placement + credentials, same story as vSphere above. Auth is EITHER an
+            # API token OR a username/password - set exactly one pair in values.infra.proxmox, the
+            # provisioner rejects both/neither.
+            - name: KAAS_PROXMOX_ENDPOINT
+              value: {{ .Values.infra.proxmox.endpoint | quote }}
+            - name: KAAS_PROXMOX_INSECURE
+              value: {{ .Values.infra.proxmox.insecure | ternary "1" "0" | quote }}
+            {{- if .Values.infra.proxmox.apiToken }}
+            - name: KAAS_PROXMOX_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kaas.secretName" . }}
+                  key: proxmox-api-token
+            {{- else }}
+            - name: KAAS_PROXMOX_USERNAME
+              value: {{ .Values.infra.proxmox.username | quote }}
+            - name: KAAS_PROXMOX_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kaas.secretName" . }}
+                  key: proxmox-password
+            {{- end }}
+            - name: KAAS_PROXMOX_NODE
+              value: {{ .Values.infra.proxmox.node | quote }}
+            - name: KAAS_PROXMOX_DATASTORE
+              value: {{ .Values.infra.proxmox.datastore | quote }}
+            # VLAN is worker/module-only - the wizard doesn't need it, only the tofu module (and
+            # the golden-image Packer build, which is out of band, not part of this chart).
+            - name: KAAS_PROXMOX_NET_VLAN
+              value: {{ .Values.infra.proxmox.network.vlan | quote }}
+            {{- end }}
+            {{- if .Values.infra.netbox.url }}
+            # NetBox IPAM (optional, shared-network providers only): worker-only, since it wraps
+            # the provisioner that actually assigns addresses.
+            - name: KAAS_NETBOX_URL
+              value: {{ .Values.infra.netbox.url | quote }}
+            - name: KAAS_NETBOX_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kaas.secretName" . }}
+                  key: netbox-token
+            - name: KAAS_NETBOX_USERNAME
+              value: {{ .Values.infra.netbox.username | quote }}
+            - name: KAAS_NETBOX_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kaas.secretName" . }}
+                  key: netbox-password
+            - name: KAAS_NETBOX_INSECURE
+              value: {{ .Values.infra.netbox.insecure | ternary "1" "0" | quote }}
+            - name: KAAS_NETBOX_TAG
+              value: {{ .Values.infra.netbox.tag | quote }}
+            {{- end }}
+            {{- if and (eq (include "kaas.real" .) "true") .Values.dns.server }}
+            # Site DNS, UPDATE half: worker-only, and real mode only - a fake-mode deployment has no
+            # real gateway addresses to point a name at, so it keeps the fake registrar and merely
+            # logs what it would publish. This is the credential that can write the
+            # platform's delegated zone - it stays out of the api Deployment exactly like the
+            # hypervisor and vCenter credentials, and the api never needs it (it names domains, it
+            # does not publish them).
+            - name: KAAS_DNS
+              value: nsupdate
+            - name: KAAS_DNS_SERVER
+              value: {{ .Values.dns.server | quote }}
+            - name: KAAS_DNS_ZONE
+              value: {{ .Values.dns.zone | quote }}
+            - name: KAAS_DNS_TTL
+              value: {{ .Values.dns.ttl | quote }}
+            - name: KAAS_DNS_AUTH
+              value: {{ .Values.dns.auth | quote }}
+            {{- if eq .Values.dns.auth "gss" }}
+            - name: KAAS_DNS_KRB_USERNAME
+              value: {{ .Values.dns.kerberos.username | quote }}
+            - name: KAAS_DNS_KRB_REALM
+              value: {{ .Values.dns.kerberos.realm | quote }}
+            - name: KAAS_DNS_KRB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kaas.secretName" . }}
+                  key: dns-krb-password
+            {{- else if eq .Values.dns.auth "tsig" }}
+            - name: KAAS_DNS_TSIG_KEYNAME
+              value: {{ .Values.dns.tsig.keyName | quote }}
+            - name: KAAS_DNS_TSIG_ALGO
+              value: {{ .Values.dns.tsig.algorithm | quote }}
+            - name: KAAS_DNS_TSIG_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kaas.secretName" . }}
+                  key: dns-tsig-secret
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- if $remote }}
+            # Remote hypervisor: libvirt over SSH, Ansible through a ProxyCommand, kubectl/helm
+            # through the SOCKS tunnel this pod opens for itself on its own loopback.
+            - name: KAAS_KVM_HOST
+              value: {{ .Values.kvm.host | quote }}
+            - name: KAAS_KVM_SSH_USER
+              value: {{ .Values.kvm.sshUser | quote }}
+            - name: KAAS_KVM_SSH_PORT
+              value: {{ .Values.kvm.sshPort | quote }}
+            - name: KAAS_KVM_SSH_KEY_FILE
+              value: /keys/kvm
+            {{- if .Values.kvm.ssh.knownHosts }}
+            - name: KAAS_KVM_KNOWN_HOSTS_FILE
+              value: /keys/kvm_known_hosts
+            {{- end }}
+            - name: KAAS_KVM_SOCKS_ADDR
+              value: {{ include "kaas.workerSocksAddr" . | quote }}
+            {{- else }}
+            - name: LIBVIRT_DEFAULT_URI
+              value: qemu:///system
+            {{- end }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            {{- if $real }}
+            - name: images
+              mountPath: /srv/images
+              readOnly: true
+            - name: keys
+              mountPath: /keys
+              readOnly: true
+            {{- if not $remote }}
+            - name: libvirt
+              mountPath: /run/libvirt
+            {{- end }}
+            {{- end }}
+      volumes:
+        - name: work
+          {{- if .Values.worker.workspace.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.worker.workspace.existingClaim | default (printf "%s-work" $fullname) }}
+          {{- else }}
+          # No claim: workspaces live and die with the pod. Fine for a throwaway install - Postgres
+          # is the source of truth and a lost workspace is re-created - but it means re-importing
+          # state for any cluster the pod was mid-way through.
+          emptyDir: {}
+          {{- end }}
+        {{- if $real }}
+        - name: images
+          {{- if .Values.worker.images.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.worker.images.existingClaim | default (printf "%s-images" $fullname) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: keys
+          secret:
+            secretName: {{ include "kaas.secretName" . }}
+            defaultMode: 0400
+            items:
+              - key: cluster-ssh-private-key
+                path: id
+              {{- if $remote }}
+              - key: kvm-ssh-private-key
+                path: kvm
+              {{- if .Values.kvm.ssh.knownHosts }}
+              - key: kvm-known-hosts
+                path: kvm_known_hosts
+              {{- end }}
+              {{- end }}
+        {{- if not $remote }}
+        - name: libvirt
+          hostPath:
+            path: {{ .Values.kvm.local.libvirtSocketPath }}
+            type: Directory
+        {{- end }}
+        {{- end }}
+      {{- if or $remote (not $real) }}
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- else }}
+      # local mode: only the node(s) that actually run libvirt can host this pod.
+      nodeSelector:
+        {{- toYaml .Values.kvm.local.nodeSelector | nindent 8 }}
+      {{- with .Values.kvm.local.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+{{- if and .Values.worker.workspace.enabled (not .Values.worker.workspace.existingClaim) }}
+---
+{{/*
+The per-cluster OpenTofu workspaces, SHARED by every worker replica - which is why the access mode
+defaults to ReadWriteMany. Any replica may pick up any cluster's next phase, and it needs the state
+the previous phase wrote. With a single replica RWO is fine; with more, an RWO volume would bind the
+Deployment to one node and the scheduler would stall the rest.
+*/}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $fullname }}-work
+  labels:
+    {{- include "kaas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  accessModes:
+    - {{ .Values.worker.workspace.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.worker.workspace.size }}
+  {{- if .Values.worker.workspace.storageClass }}
+  storageClassName: {{ .Values.worker.workspace.storageClass | quote }}
+  {{- end }}
+{{- end }}
+{{- if and $real .Values.worker.images.enabled (not .Values.worker.images.existingClaim) }}
+---
+{{/* The golden images (per OS/Kubernetes pair) plus the fallback base image. Read-only in the pod. */}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $fullname }}-images
+  labels:
+    {{- include "kaas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  accessModes:
+    - {{ .Values.worker.images.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.worker.images.size }}
+  {{- if .Values.worker.images.storageClass }}
+  storageClassName: {{ .Values.worker.images.storageClass | quote }}
+  {{- end }}
+{{- end }}

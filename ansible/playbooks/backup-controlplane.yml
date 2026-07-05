@@ -1,0 +1,70 @@
+---
+# Single-node control-plane OS upgrade, step 1 of 2: archive the sole control plane's state BEFORE
+# its VM is destroyed and re-created from the new-OS golden image. Invoked by
+# internal/config/ansible.BackupControlPlane with extra-vars target_node + artifacts_dir.
+#
+# We copy the raw etcd data directory rather than an etcd snapshot, so the restore needs no
+# version-matched etcdctl on the fresh node - it just drops the data back and starts kubelet. To get
+# a consistent copy we quiesce etcd first (remove its static manifest so kubelet stops it); the node
+# is being replaced anyway, so the brief control-plane stop is expected. The /etc/kubernetes archive
+# (taken WHILE the manifest is still in place) carries the CA + all certs so the rebuilt node keeps
+# the cluster's identity. We also archive /var/lib/kubelet: kubeadm init writes the kubelet's OWN
+# runtime config (config.yaml) and client certs there, separate from /etc/kubernetes - without it the
+# replacement node has no kubelet config at all and kubelet refuses to start. All archives are fetched
+# to the controller's per-cluster artifacts dir, which survives the VM being replaced.
+- name: Back up the control plane (etcd data + /etc/kubernetes + kubelet state)
+  hosts: "{{ target_node | default('control_plane') }}"
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Archive /etc/kubernetes (pki, manifests, kubeconfigs) - with the etcd manifest in place
+      ansible.builtin.command: tar czf /root/kube-etc-backup.tar.gz -C / etc/kubernetes
+      changed_when: true
+
+    - name: Quiesce etcd - remove its static manifest so kubelet stops the pod
+      ansible.builtin.command: mv /etc/kubernetes/manifests/etcd.yaml /root/etcd.yaml.hold
+      args:
+        removes: /etc/kubernetes/manifests/etcd.yaml
+
+    - name: Wait for etcd to stop listening (consistent on-disk state)
+      ansible.builtin.shell: "! ss -H -tln sport = :2379 | grep -q ."
+      args:
+        executable: /bin/bash
+      register: etcd_stopped
+      until: etcd_stopped.rc == 0
+      retries: 30
+      delay: 2
+      changed_when: false
+
+    - name: Archive the quiesced etcd data directory
+      ansible.builtin.command: tar czf /root/etcd-data-backup.tar.gz -C /var/lib etcd
+      changed_when: true
+
+    # The node is being destroyed right after this backup, so stopping kubelet here (rather than
+    # restarting it) is fine - it just gives a consistent snapshot of its own state directory.
+    - name: Stop kubelet - consistent snapshot of its state directory
+      ansible.builtin.systemd:
+        name: kubelet
+        state: stopped
+
+    - name: Archive the kubelet state directory (config.yaml, client certs) - excluding ephemeral pod state
+      ansible.builtin.command: tar czf /root/kubelet-data-backup.tar.gz --exclude=./pods -C /var/lib kubelet
+      changed_when: true
+
+    - name: Fetch the etcd data archive to the controller
+      ansible.builtin.fetch:
+        src: /root/etcd-data-backup.tar.gz
+        dest: "{{ artifacts_dir }}/etcd-data.tar.gz"
+        flat: true
+
+    - name: Fetch the /etc/kubernetes archive to the controller
+      ansible.builtin.fetch:
+        src: /root/kube-etc-backup.tar.gz
+        dest: "{{ artifacts_dir }}/kube-etc.tar.gz"
+        flat: true
+
+    - name: Fetch the kubelet state archive to the controller
+      ansible.builtin.fetch:
+        src: /root/kubelet-data-backup.tar.gz
+        dest: "{{ artifacts_dir }}/kubelet-data.tar.gz"
+        flat: true

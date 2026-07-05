@@ -1,0 +1,11 @@
+-- 0033_cluster_vault.sql - HashiCorp Vault integration: every cluster owns a KV subtree in the
+-- central Vault (kaas/clusters/<id>/*) and two policies (read/write) that mirror the platform's
+-- per-cluster access model, plus a per-cluster JWT auth role the in-cluster External Secrets Operator
+-- uses to read that subtree. vault_wired is the observed-state marker recording that the cluster's
+-- path + policies + ESO auth role have been provisioned and its ClusterSecretStore applied (see
+-- reconcileVaultWiring / the external_secrets ansible role), so the idempotent provisioning is skipped
+-- once done - the same shape as gateway_wired/dns_wired. It is dropped on delete when releaseVault
+-- tears the path down. Pre-existing rows default to false: the wiring fires on their next reconcile
+-- once the external-secrets add-on is installed. The per-user access bindings are NOT gated by this
+-- column; they are converged separately by the leader-elected vault.Manager.SyncAccess sweep.
+ALTER TABLE clusters ADD COLUMN IF NOT EXISTS vault_wired BOOLEAN NOT NULL DEFAULT false;

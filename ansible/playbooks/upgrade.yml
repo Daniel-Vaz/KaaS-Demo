@@ -1,0 +1,38 @@
+---
+# In-place kubeadm upgrade of a cluster to {{ k8s_version }}. Invoked by
+# internal/config/ansible.UpgradeKubernetes with extra-vars k8s_version + k8s_minor (the target).
+#
+# kubeadm upgrades one minor at a time, first control plane first:
+#   1. the first control plane runs `kubeadm upgrade apply v<target>`,
+#   2. the remaining control planes and all workers run `kubeadm upgrade node`,
+# each followed by draining the node and bumping kubelet/kubectl. The `upgrade` role guards every
+# node with a running-version check, so the whole play is idempotent and safe to retry.
+
+- name: Upgrade the first control plane (kubeadm upgrade apply)
+  hosts: control_plane[0]
+  become: true
+  gather_facts: true
+  roles:
+    - role: upgrade
+      vars:
+        upgrade_apply: true
+
+- name: Upgrade the remaining control planes (kubeadm upgrade node)
+  hosts: control_plane[1:]
+  become: true
+  gather_facts: true
+  serial: 1
+  roles:
+    - role: upgrade
+      vars:
+        upgrade_apply: false
+
+- name: Upgrade the workers (kubeadm upgrade node)
+  hosts: workers
+  become: true
+  gather_facts: true
+  serial: 1
+  roles:
+    - role: upgrade
+      vars:
+        upgrade_apply: false

@@ -1,0 +1,64 @@
+---
+# Per-node half of control_plane_metrics: the kube-scheduler/kube-controller-manager/etcd manifest
+# edits, invoked from control-plane-metrics.yml's first play (hosts: control_plane, serial: 1). See
+# kube_proxy.yml for why the cluster-wide ConfigMap patch is a separate task file entirely, invoked
+# from a separate play.
+#
+# kubeadm's defaults are NOT monitoring-friendly out of the box, and kube-prometheus-stack's
+# built-in ServiceMonitors for kubeScheduler/kubeControllerManager/kubeEtcd (all enabled by
+# default) silently fail to scrape until this runs:
+#
+#   - kube-scheduler / kube-controller-manager: kubeadm's generated static-pod manifests pass
+#     `--bind-address=127.0.0.1`, so the secure metrics port is only reachable from the node's own
+#     loopback - invisible to Prometheus, which scrapes as a normal (non-hostNetwork) pod.
+#   - etcd: kubeadm's manifest exposes only the mTLS client port (2379); scraping it needs client
+#     certs. etcd ships a purpose-built unauthenticated metrics-only listener (serves /metrics and
+#     /health only, never KV data) for exactly this case - kube-prometheus-stack's default
+#     `kubeEtcd.service` already targets it on port 2381, so we just need to turn it on.
+#
+# Every fix here is a config/manifest change: kubelet watches /etc/kubernetes/manifests and restarts
+# a static pod when its file changes. Idempotent throughout. The static-pod restarts are mostly
+# self-healing (kube-scheduler/kube-controller-manager tolerate a simultaneous bounce via leader
+# election) with ONE exception we must orchestrate: on an HA control plane the etcd members must NOT
+# restart at once, or quorum drops and every apiserver stops serving. The play runs serial:1 and the
+# etcd edit is followed by a quorum-health gate (below) so only one member is ever down at a time.
+
+- name: Point kube-scheduler's metrics bind address at 0.0.0.0
+  # Replaces whatever IP kubeadm set (typically 127.0.0.1); a no-op once already 0.0.0.0.
+  ansible.builtin.replace:
+    path: /etc/kubernetes/manifests/kube-scheduler.yaml
+    regexp: '- --bind-address=(?!0\.0\.0\.0\b)\S+'
+    replace: '- --bind-address=0.0.0.0'
+
+- name: Point kube-controller-manager's metrics bind address at 0.0.0.0
+  ansible.builtin.replace:
+    path: /etc/kubernetes/manifests/kube-controller-manager.yaml
+    regexp: '- --bind-address=(?!0\.0\.0\.0\b)\S+'
+    replace: '- --bind-address=0.0.0.0'
+
+- name: Open etcd's unauthenticated metrics-only listener (:2381)
+  # kubeadm's manifest already carries --listen-metrics-urls=http://127.0.0.1:2381 by default (not
+  # merely absent) - `regexp` finds and rewrites that existing line in place; `insertafter` is only
+  # the fallback anchor for the (unexpected) case it's missing entirely. Matching by regexp instead
+  # of blindly inserting avoids a second, later-and-therefore-winning --listen-metrics-urls flag,
+  # which silently left etcd's metrics port loopback-only despite our insert.
+  ansible.builtin.lineinfile:
+    path: /etc/kubernetes/manifests/etcd.yaml
+    regexp: '^\s*- --listen-metrics-urls=.*$'
+    line: '    - --listen-metrics-urls=http://0.0.0.0:2381'
+    insertafter: '^\s*- etcd\s*$'
+
+- name: Wait for this etcd member to restart and rejoin quorum before touching the next control plane
+  # The edit above makes kubelet restart the etcd static pod. The play is serial:1 so only one member
+  # is ever bounced at a time; this gate keeps it that way by not returning until the member is back.
+  # We poll the node's ROUTABLE address, not loopback: kubeadm's old default bound :2381 to 127.0.0.1
+  # only, so a 200 on ansible_host proves the NEW 0.0.0.0 listener (i.e. the restarted process) is up,
+  # not the pre-restart etcd still answering on loopback. etcd's /health returns 200 only with quorum,
+  # so this also confirms the member rejoined. Fast no-op on idempotent re-runs (already 0.0.0.0).
+  ansible.builtin.uri:
+    url: "http://{{ ansible_host }}:2381/health"
+    status_code: 200
+  register: etcd_metrics_health
+  retries: 30
+  delay: 3
+  until: etcd_metrics_health.status == 200

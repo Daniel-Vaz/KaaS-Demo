@@ -1,0 +1,27 @@
+{{- if eq .Values.auth.mode "ldap" }}
+{{/*
+The directory mapping config (internal/authn/ldap), mounted at /etc/kaas/ldap.yaml in the api pod.
+
+A ConfigMap rather than a Secret on purpose: it holds the DCs' addresses, the user subtree and the
+mapping filters - deployment topology, not credentials. The service account's password is the one
+secret here and it arrives separately, via secretKeyRef from the chart's Secret. That split is what
+lets this file be reviewed, diffed and templated like any other config.
+
+The api pod runs with a read-only rootfs, so this has to be a real volume mount; there is nowhere to
+write a file at startup.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kaas.fullname" . }}-ldap
+  labels:
+    {{- include "kaas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+data:
+  ldap.yaml: |
+    {{- if .Values.auth.ldap.config }}
+    {{- .Values.auth.ldap.config | nindent 4 }}
+    {{- else }}
+    {{- fail "auth.mode=ldap requires auth.ldap.config (the ldap.yaml document - see deploy/ldap.example.yaml)" }}
+    {{- end }}
+{{- end }}

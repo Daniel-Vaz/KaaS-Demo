@@ -1,0 +1,52 @@
+---
+# Tune this control-plane node's etcd backend store. Runs BEFORE kubeadm init/join; the
+# controlplane and controlplane_join roles pass `--patches /etc/kubernetes/patches`, so kubeadm
+# bakes these flags into the etcd static pod it generates. Same mechanism as controlplane_audit -
+# see that role for why a JSON6902 patch beats ClusterConfiguration.etcd.local.extraArgs (no kubeadm
+# apiVersion branching, and we never have to know the rest of the generated command).
+#
+# This is the PREVENTION half of etcd maintenance (internal/reconcile's DefragmentingEtcd phase is
+# the remediation half). Two flags, both absent from kubeadm's generated manifest, so appending them
+# can never produce a duplicate:
+#
+#   --quota-backend-bytes      etcd's hard ceiling on the backend store. Hitting it arms the NOSPACE
+#                              alarm and the entire cluster goes READ-ONLY until a human defragments
+#                              and disarms - the actual outage this whole feature exists to avoid.
+#                              etcd's default is 2GiB and kubeadm does not raise it.
+#   --auto-compaction-*        etcd-side periodic compaction, independent of the apiserver's
+#                              --etcd-compaction-interval. Compaction frees keyspace LOGICALLY; it
+#                              never shrinks the bbolt file (that's what defrag is for), but it is
+#                              what keeps the logical size - and therefore the growth rate of the
+#                              file - bounded.
+#
+# etcd's upper supported bound for --quota-backend-bytes is 8GiB; the role does not validate it,
+# app.etcdQuotaBytes does (a bad value here would only surface as a crash-looping etcd).
+#
+# Shared by the first control plane (bootstrap.yml, before the `controlplane` role) and every
+# joining control plane (bootstrap.yml's HA play and join-controlplane.yml's rolling-replacement
+# play, before `controlplane_join`), so every member of an HA cluster is tuned identically - and a
+# node rebuilt by a rolling OS upgrade comes back tuned. A node bootstrapped BEFORE this role
+# existed is converged by the etcd_maintenance role instead (tune.yml), which edits the live manifest
+# under its own one-member-at-a-time quorum gate rather than restarting etcd unannounced.
+
+- name: Ensure the kubeadm patches dir exists
+  ansible.builtin.file:
+    path: /etc/kubernetes/patches
+    state: directory
+    mode: '0700'
+
+- name: Write the kubeadm etcd tuning patch (JSON6902)
+  # The file name selects the component (etcd) and patch type (json = RFC6902).
+  ansible.builtin.copy:
+    dest: /etc/kubernetes/patches/etcd+json.yaml
+    mode: '0600'
+    content: |
+      - op: add
+        path: /spec/containers/0/command/-
+        value: --quota-backend-bytes={{ etcd_quota_backend_bytes }}
+      - op: add
+        path: /spec/containers/0/command/-
+        value: --auto-compaction-mode=periodic
+      - op: add
+        path: /spec/containers/0/command/-
+        value: --auto-compaction-retention={{ etcd_auto_compaction_retention }}

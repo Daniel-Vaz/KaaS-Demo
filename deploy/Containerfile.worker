@@ -1,0 +1,90 @@
+# Build the worker/reconciler. Unlike the API (pure Go → distroless), the worker shells out
+# to OpenTofu, Ansible and Helm and dials the libvirt socket, so its runtime image carries
+# that toolchain. It runs host-networked with /run/libvirt mounted (see docs/networking.md).
+# The ansible/, infra/ and migrations/ trees are mounted at runtime by compose (not baked in),
+# so edits take effect without a rebuild.
+FROM docker.io/library/golang:1.26 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/worker ./cmd/worker
+
+FROM docker.io/library/ubuntu:24.04
+
+# Pinned toolchain versions.
+ARG TOFU_VERSION=1.10.3
+ARG HELM_VERSION=3.16.4
+ARG KUBECTL_VERSION=1.36.2
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ansible-core (only ansible.builtin is used), the libvirt client lib the OpenTofu libvirt
+# provider links against, genisoimage (the provider shells out to it to build each node's
+# cloud-init NoCloud ISO), plus ssh/curl/unzip for provisioning and installing the tools.
+# dnsutils gives `nsupdate` and krb5-user `kinit`: the DNS seam (KAAS_DNS=nsupdate) publishes each
+# cluster's apps wildcard by RFC 2136 dynamic update, GSS-TSIG-signed against the site's domain
+# controllers. Both are no-ops in a deployment that publishes no DNS.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl unzip openssh-client bash-completion \
+      ansible-core libvirt-clients genisoimage \
+      dnsutils krb5-user \
+ && ln -sf /usr/bin/genisoimage /usr/local/bin/mkisofs \
+ && rm -rf /var/lib/apt/lists/*
+
+# OpenTofu (ADR-005 provisioner backend).
+RUN curl -fsSL "https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}/tofu_${TOFU_VERSION}_linux_amd64.zip" -o /tmp/tofu.zip \
+ && unzip -q /tmp/tofu.zip -d /usr/local/bin tofu \
+ && rm /tmp/tofu.zip && tofu version
+
+# Helm (add-on manager - ADR-009).
+RUN curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" -o /tmp/helm.tgz \
+ && tar -xzf /tmp/helm.tgz -C /tmp linux-amd64/helm \
+ && mv /tmp/linux-amd64/helm /usr/local/bin/helm \
+ && rm -rf /tmp/helm.tgz /tmp/linux-amd64 && helm version --short
+
+# kubectl - used by the interactive cluster shell (internal/shell) and the real metrics collector
+# (KAAS_METRICS=kubectl). The worker is the only container that can reach the cluster API server.
+RUN curl -fsSL "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl" -o /usr/local/bin/kubectl \
+ && chmod +x /usr/local/bin/kubectl && kubectl version --client
+
+ENV LIBVIRT_DEFAULT_URI=qemu:///system
+COPY --from=build /out/worker /usr/local/bin/worker
+
+# The three trees the worker reads at runtime are BAKED IN, not only mounted. Compose bind-mounts
+# them over these paths (so edits take effect without a rebuild - the original intent), but
+# Kubernetes has no bind mounts: the Helm chart in deploy/helm runs this same image with nothing
+# mounted, so the image must be self-contained.
+COPY migrations /migrations
+COPY ansible /ansible
+COPY infra /infra
+ENV KAAS_MIGRATIONS_DIR=/migrations \
+    KAAS_ANSIBLE_DIR=/ansible \
+    KAAS_LIBVIRT_MODULE_DIR=/infra/libvirt \
+    KAAS_VSPHERE_MODULE_DIR=/infra/vsphere \
+    KAAS_PROXMOX_MODULE_DIR=/infra/proxmox
+
+# Pre-warm the OpenTofu providers into a local FILESYSTEM MIRROR and make it tofu's ONLY
+# installation source (the .terraformrc + TF_CLI_CONFIG_FILE below). Every provider - libvirt for
+# KVM, hashicorp/vsphere, bpg/proxmox - is baked in, so provisioning starts immediately and the
+# runtime never touches the registry.
+#
+# A plugin *cache* (the previous approach) is NOT enough: it skips the download but tofu still calls
+# the registry to DISCOVER which version satisfies a range constraint (the modules pin `~> 0.8.0` /
+# `~> 2.8`), so a first `tofu init` at reconcile time still needs the registry - slow, and a hard
+# failure on a host that can't reach it. A filesystem mirror replaces registry discovery entirely.
+#
+# The provider version is therefore governed by THIS image. internal/provision/tofurunner drops each
+# workspace's stale lock and re-resolves from the mirror on every init, so a long-running deployment
+# can take image upgrades (a newer provider) without wedging existing clusters - the whole point.
+ENV TF_CLI_CONFIG_FILE=/etc/tofu/cli.tfrc
+RUN mkdir -p /var/lib/tofu-mirror /etc/tofu \
+ && tofu -chdir=/infra/libvirt providers mirror -platform=linux_amd64 /var/lib/tofu-mirror \
+ && tofu -chdir=/infra/vsphere providers mirror -platform=linux_amd64 /var/lib/tofu-mirror \
+ && tofu -chdir=/infra/proxmox providers mirror -platform=linux_amd64 /var/lib/tofu-mirror \
+ && printf 'provider_installation {\n  filesystem_mirror {\n    path = "/var/lib/tofu-mirror"\n  }\n}\n' > /etc/tofu/cli.tfrc \
+ && rm -rf /infra/libvirt/.terraform /infra/libvirt/.terraform.lock.hcl \
+           /infra/vsphere/.terraform /infra/vsphere/.terraform.lock.hcl \
+           /infra/proxmox/.terraform /infra/proxmox/.terraform.lock.hcl
+
+ENTRYPOINT ["worker"]

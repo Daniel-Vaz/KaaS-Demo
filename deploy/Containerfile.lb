@@ -1,0 +1,13 @@
+# The load balancer for the scaled bring-up (deploy/compose.scale.yaml): plain nginx fanning the
+# two published ports out over the web/api replicas. It ships as an image rather than a bind-mounted
+# config because the resolver script rewrites the config in place at start-up, which a read-only
+# bind mount would not allow.
+FROM docker.io/library/nginx:alpine
+# The WebSocket upgrade map, at http level - the shell WebSocket passes through this hop too.
+COPY deploy/nginx-upgrade-map.conf /etc/nginx/conf.d/00-upgrade-map.conf
+COPY deploy/nginx-lb.conf /etc/nginx/conf.d/default.conf
+# Fills in `resolver` from the container's DNS, so the web/api upstreams are re-resolved as
+# replicas come and go (shared with the portal image; see deploy/nginx-resolver.sh).
+COPY deploy/nginx-resolver.sh /docker-entrypoint.d/20-kaas-resolver.sh
+RUN chmod +x /docker-entrypoint.d/20-kaas-resolver.sh
+EXPOSE 80 81

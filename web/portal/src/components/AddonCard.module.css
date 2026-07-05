@@ -1,0 +1,94 @@
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  height: 100%;
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-md);
+  background: var(--mantine-color-body);
+  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.selectable {
+  cursor: pointer;
+}
+
+.selectable:hover {
+  border-color: var(--mantine-color-brand-4);
+  transform: translateY(-2px);
+  box-shadow: var(--mantine-shadow-sm);
+}
+
+.selected {
+  border-color: var(--mantine-color-brand-6);
+  background: var(--mantine-color-brand-light);
+}
+
+.locked {
+  cursor: default;
+  border-style: dashed;
+}
+
+.locked:hover {
+  transform: none;
+  box-shadow: none;
+}
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.titleWrap {
+  min-width: 0;
+  flex: 1;
+}
+
+.desc {
+  color: var(--mantine-color-dimmed);
+  font-size: 12.5px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* The check pip in the top-right corner mirrors the selection state. */
+.pip {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  border: 1.5px solid var(--mantine-color-default-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: transparent;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.pipOn {
+  background: var(--mantine-color-brand-6);
+  border-color: var(--mantine-color-brand-6);
+  color: #fff;
+}
+
+.pipLocked {
+  background: var(--mantine-color-default-hover);
+  border-color: var(--mantine-color-default-border);
+  color: var(--mantine-color-dimmed);
+}
+
+.footer {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 4px;
+}

@@ -1,0 +1,23 @@
+# Build the web portal (React + Mantine SPA) and serve it from nginx. nginx also reverse-proxies
+# /api/* to the Go control-plane API (see deploy/nginx.conf), so the browser talks to a single
+# same-origin front door on :8080. Build context is the repo root (like the api/worker images);
+# .containerignore keeps web/portal/node_modules and dist out of the context.
+FROM docker.io/library/node:22-alpine AS build
+WORKDIR /app
+COPY web/portal/package.json web/portal/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/portal/ ./
+RUN npm run build
+
+FROM docker.io/library/nginx:alpine
+# The upgrade map must load at http-level (a sibling of default.conf under conf.d), so WebSocket
+# upgrades work for the cluster shell without breaking SSE. See deploy/nginx-upgrade-map.conf.
+COPY deploy/nginx-upgrade-map.conf /etc/nginx/conf.d/00-upgrade-map.conf
+COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
+# Fills in the `resolver` directive from the container's DNS at start-up, so nginx re-resolves the
+# `api` upstream and picks up api replicas as they come and go (see deploy/nginx-resolver.sh). The
+# nginx image runs everything in /docker-entrypoint.d before starting.
+COPY deploy/nginx-resolver.sh /docker-entrypoint.d/20-kaas-resolver.sh
+RUN chmod +x /docker-entrypoint.d/20-kaas-resolver.sh
+COPY --from=build /app/dist /usr/share/nginx/html
+EXPOSE 80

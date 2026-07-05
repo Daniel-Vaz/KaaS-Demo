@@ -1,0 +1,411 @@
+# Real-mode overlay (KVM) - this is the DEFAULT bring-up. Layered on top of compose.yaml:
+#
+#   make up          # == podman compose -f compose.yaml -f compose.real.yaml up -d --build
+#
+# It adds the host-networked `worker` - the ONLY container that touches libvirt (see
+# docs/networking.md) - and hands reconciliation to it (the API's in-process reconciler is
+# disabled so it doesn't also run with fake providers). The worker reaches Postgres over the
+# published host port; the API keeps talking to it over the compose network.
+#
+# Requires a .env with the real knobs (see .env.example), with LITERAL values (compose does
+# not run `$(...)` or expand `~`): KAAS_BASE_IMAGE (a path libvirtd resolves on the HOST),
+# KAAS_SSH_PUBLIC_KEY (the literal key contents), KAAS_SSH_PRIVATE_KEY_FILE (an absolute host
+# path, mounted read-only below), and a stable KAAS_SECRET_KEY shared with the API.
+name: kaas-demo
+
+services:
+  api:
+    environment:
+      - KAAS_DISABLE_RECONCILER=1
+      # The API can't reach the cluster VMs; proxy interactive shells (KAAS_SHELL), the Workloads
+      # page's kubectl calls (KAAS_KUBE), the Monitoring page's PromQL queries (KAAS_MONITORING),
+      # the Security page's Trivy reads (KAAS_SECURITY) and the Audit tab's apiserver-log reads
+      # (KAAS_AUDIT) to the exec agent - now the dedicated `shell` sandbox (below), reached at
+      # host.containers.internal:8082 (Podman's alias for the host, where the sandbox binds :8082).
+      # KAAS_SHELL_TOKEN is the shared bearer the API presents; SET IT in .env so both sides match -
+      # the sandbox holds no KAAS_SECRET_KEY to derive one from, so leaving it empty runs the exec
+      # channel unauthenticated (localhost-only, and warned).
+      - KAAS_SHELL=worker
+      - KAAS_KUBE=worker
+      - KAAS_MONITORING=worker
+      - KAAS_SECURITY=worker
+      - KAAS_AUDIT=worker
+      - KAAS_TUNNEL=worker
+      - KAAS_ADDON_VALUES=helm
+      - KAAS_SHELL_AGENT_ADDR=${KAAS_SHELL_AGENT_ADDR:-host.containers.internal:8082}
+      - KAAS_SHELL_TOKEN=${KAAS_SHELL_TOKEN:-}
+      # Node SSH (Nodes tab → SSH) proxies to a SEPARATE sandbox - the `nodessh` service below, on its
+      # own port :8084 - because that one holds the VM SSH key and must not be reachable through the
+      # shell agent's bash PTY. KAAS_NODE_SSH_TOKEN is its own bearer, distinct from KAAS_SHELL_TOKEN.
+      - KAAS_NODE_SSH=agent
+      - KAAS_NODE_SSH_AGENT_ADDR=${KAAS_NODE_SSH_AGENT_ADDR:-host.containers.internal:8084}
+      - KAAS_NODE_SSH_TOKEN=${KAAS_NODE_SSH_TOKEN:-}
+      # Base compose.yaml defaults KAAS_VAULT=fake (so a real-infra .env can't wedge up-fake, which
+      # reconciles in-process). Real mode is different: the API doesn't reconcile (KAAS_DISABLE_RECONCILER
+      # above - the worker does), but it still needs the real seam to mint the short-lived handoff token
+      # behind the portal's "View in Vault" link. The management token + per-cluster provisioning live on
+      # the worker (KAAS_VAULT=real there); the addr/token/mount are inherited from the base service.
+      - KAAS_VAULT=${KAAS_VAULT:-real}
+
+  postgres:
+    # Publish to the host so the host-networked worker can reach it at localhost:5432.
+    ports:
+      - "5432:5432"
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Containerfile.worker
+    # The only container on the host network - so it can SSH to VMs on virbr0
+    # (192.168.122.0/24) and reach the published Postgres at localhost:5432.
+    network_mode: host
+    environment:
+      - DATABASE_URL=postgres://kaas:kaas@localhost:5432/kaas?sslmode=disable
+      - KAAS_MIGRATIONS_DIR=/migrations
+      - KAAS_SECRET_KEY=${KAAS_SECRET_KEY:-dev-only-change-me}
+      # A corporate-proxied build host gets http_proxy/HTTP_PROXY baked into the image by
+      # podman/buildah automatically. kubectl/helm/govmomi(vSphere)/the Proxmox+NetBox clients all
+      # honor it, and would otherwise route every call to a cluster VM / vCenter / Proxmox / NetBox
+      # through that proxy - which has no route to this lab-internal network. See compose.yaml's api
+      # service for the matching fix; extend the list here if your infra lives on a different range.
+      - NO_PROXY=${NO_PROXY:-localhost,127.0.0.1,172.23.0.0/16,192.168.122.0/24}
+      - no_proxy=${no_proxy:-localhost,127.0.0.1,172.23.0.0/16,192.168.122.0/24}
+      # The worker also seeds the admin account on startup (app.New → ensureAdmin), racing the API
+      # against the shared DB. It MUST use the same credentials as the API (compose.yaml) - otherwise,
+      # if the worker wins the race, it seeds the admin with the DEFAULT password and the .env
+      # KAAS_ADMIN_PASSWORD is silently ignored (ensureAdmin never resets an existing account),
+      # breaking teardown-clusters.sh's admin login.
+      - KAAS_ADMIN_USERNAME=${KAAS_ADMIN_USERNAME:-admin}
+      - KAAS_ADMIN_PASSWORD=${KAAS_ADMIN_PASSWORD:-admin}
+      - KAAS_PROVISIONER=tofu
+      - KAAS_CONFIG=ansible
+      - KAAS_ADDONS=helm
+      # Infrastructure providers. The worker builds a real provisioner for each: kvm → OpenTofu +
+      # libvirt (below), vsphere → OpenTofu + vCenter (the KAAS_VSPHERE_* block), proxmox → OpenTofu
+      # + Proxmox VE (the KAAS_PROXMOX_* block). Both the API and the worker must see the same list
+      # - the API offers the choice, the worker honours it.
+      - KAAS_INFRA_PROVIDERS=${KAAS_INFRA_PROVIDERS:-kvm}
+      # vSphere: placement + credentials (worker-only). Reached directly from the host network, so
+      # the worker needs L3 routing to vCenter and to the cluster VMs' portgroup. Ignored unless
+      # vsphere is in KAAS_INFRA_PROVIDERS.
+      - KAAS_VSPHERE_URL=${KAAS_VSPHERE_URL:-}
+      - KAAS_VSPHERE_USERNAME=${KAAS_VSPHERE_USERNAME:-}
+      - KAAS_VSPHERE_PASSWORD=${KAAS_VSPHERE_PASSWORD:-}
+      - KAAS_VSPHERE_INSECURE=${KAAS_VSPHERE_INSECURE:-0}
+      - KAAS_VSPHERE_DATACENTER=${KAAS_VSPHERE_DATACENTER:-}
+      - KAAS_VSPHERE_CLUSTER=${KAAS_VSPHERE_CLUSTER:-}
+      - KAAS_VSPHERE_DATASTORE=${KAAS_VSPHERE_DATASTORE:-}
+      - KAAS_VSPHERE_FOLDER=${KAAS_VSPHERE_FOLDER:-}
+      - KAAS_VSPHERE_MODULE_DIR=/infra/vsphere
+      # ...and the same network shape/budget the API sees (the worker also runs admission when it
+      # seeds/reconciles, and the module needs the portgroup + addressing mode).
+      - KAAS_VSPHERE_NETWORK=${KAAS_VSPHERE_NETWORK:-}
+      - KAAS_VSPHERE_NET_MODE=${KAAS_VSPHERE_NET_MODE:-dhcp}
+      - KAAS_VSPHERE_NET_CIDR=${KAAS_VSPHERE_NET_CIDR:-}
+      - KAAS_VSPHERE_NET_GATEWAY=${KAAS_VSPHERE_NET_GATEWAY:-}
+      - KAAS_VSPHERE_NET_DNS=${KAAS_VSPHERE_NET_DNS:-}
+      - KAAS_VSPHERE_NET_RANGE=${KAAS_VSPHERE_NET_RANGE:-}
+      - KAAS_VSPHERE_BUDGET_VCPU=${KAAS_VSPHERE_BUDGET_VCPU:-64}
+      - KAAS_VSPHERE_BUDGET_MEM_MB=${KAAS_VSPHERE_BUDGET_MEM_MB:-131072}
+      - KAAS_VSPHERE_BUDGET_DISK_GB=${KAAS_VSPHERE_BUDGET_DISK_GB:-4096}
+      # Proxmox VE: placement + credentials (worker-only). Reached directly from the host network,
+      # same as vSphere. Ignored unless proxmox is in KAAS_INFRA_PROVIDERS. Auth is EITHER an API
+      # token OR a username/password - set exactly one pair, the provisioner rejects both/neither.
+      - KAAS_PROXMOX_ENDPOINT=${KAAS_PROXMOX_ENDPOINT:-}
+      - KAAS_PROXMOX_INSECURE=${KAAS_PROXMOX_INSECURE:-0}
+      - KAAS_PROXMOX_API_TOKEN=${KAAS_PROXMOX_API_TOKEN:-}
+      - KAAS_PROXMOX_USERNAME=${KAAS_PROXMOX_USERNAME:-}
+      - KAAS_PROXMOX_PASSWORD=${KAAS_PROXMOX_PASSWORD:-}
+      - KAAS_PROXMOX_NODE=${KAAS_PROXMOX_NODE:-}
+      - KAAS_PROXMOX_DATASTORE=${KAAS_PROXMOX_DATASTORE:-}
+      - KAAS_PROXMOX_MODULE_DIR=/infra/proxmox
+      # ...and the same network shape/budget the API sees, plus the VLAN tag (worker/module-only -
+      # the wizard doesn't need it, only the tofu module and the golden-image Packer build do).
+      - KAAS_PROXMOX_NET_BRIDGE=${KAAS_PROXMOX_NET_BRIDGE:-}
+      - KAAS_PROXMOX_NET_MODE=${KAAS_PROXMOX_NET_MODE:-dhcp}
+      - KAAS_PROXMOX_NET_CIDR=${KAAS_PROXMOX_NET_CIDR:-}
+      - KAAS_PROXMOX_NET_GATEWAY=${KAAS_PROXMOX_NET_GATEWAY:-}
+      - KAAS_PROXMOX_NET_DNS=${KAAS_PROXMOX_NET_DNS:-}
+      - KAAS_PROXMOX_NET_RANGE=${KAAS_PROXMOX_NET_RANGE:-}
+      - KAAS_PROXMOX_NET_VLAN=${KAAS_PROXMOX_NET_VLAN:-}
+      - KAAS_PROXMOX_BUDGET_VCPU=${KAAS_PROXMOX_BUDGET_VCPU:-64}
+      - KAAS_PROXMOX_BUDGET_MEM_MB=${KAAS_PROXMOX_BUDGET_MEM_MB:-131072}
+      - KAAS_PROXMOX_BUDGET_DISK_GB=${KAAS_PROXMOX_BUDGET_DISK_GB:-4096}
+      # NetBox IPAM (optional, shared-network providers only - vSphere or Proxmox): records the
+      # addresses their clusters occupy and releases them on delete. Unset KAAS_NETBOX_URL = the
+      # integration is not wired at all.
+      - KAAS_NETBOX_URL=${KAAS_NETBOX_URL:-}
+      - KAAS_NETBOX_TOKEN=${KAAS_NETBOX_TOKEN:-}
+      - KAAS_NETBOX_USERNAME=${KAAS_NETBOX_USERNAME:-}
+      - KAAS_NETBOX_PASSWORD=${KAAS_NETBOX_PASSWORD:-}
+      - KAAS_NETBOX_INSECURE=${KAAS_NETBOX_INSECURE:-0}
+      - KAAS_NETBOX_TAG=${KAAS_NETBOX_TAG:-kaas}
+      # Site DNS (optional): every cluster owns a subdomain of KAAS_DNS_BASE_DOMAIN and the platform
+      # publishes "*.apps.<cluster>.<base>" onto the address its default Envoy Gateway holds, so a
+      # user's app is reachable the moment the cluster is Ready. KAAS_DNS=nsupdate is worker-only -
+      # it is the credential that can write the site's zone, and it stays out of the API container
+      # exactly like the hypervisor's. The API sees only the naming half (compose.yaml). Unset
+      # KAAS_DNS_BASE_DOMAIN = the integration is not wired at all.
+      - KAAS_DNS=${KAAS_DNS:-fake}
+      - KAAS_DNS_BASE_DOMAIN=${KAAS_DNS_BASE_DOMAIN:-}
+      - KAAS_DNS_APPS_LABEL=${KAAS_DNS_APPS_LABEL:-apps}
+      # The domain controller the dynamic update goes to (its FQDN - GSS-TSIG authenticates against
+      # its DNS/<fqdn> service principal), and the DELEGATED zone that holds the records.
+      - KAAS_DNS_SERVER=${KAAS_DNS_SERVER:-}
+      - KAAS_DNS_ZONE=${KAAS_DNS_ZONE:-}
+      - KAAS_DNS_TTL=${KAAS_DNS_TTL:-300}
+      # gss (AD secure updates; the default), tsig (a shared key), or none (a zone accepting
+      # nonsecure updates). The same credential configures the in-cluster external-dns add-on.
+      - KAAS_DNS_AUTH=${KAAS_DNS_AUTH:-gss}
+      - KAAS_DNS_KRB_USERNAME=${KAAS_DNS_KRB_USERNAME:-}
+      - KAAS_DNS_KRB_PASSWORD=${KAAS_DNS_KRB_PASSWORD:-}
+      - KAAS_DNS_KRB_REALM=${KAAS_DNS_KRB_REALM:-}
+      - KAAS_DNS_TSIG_KEYNAME=${KAAS_DNS_TSIG_KEYNAME:-}
+      - KAAS_DNS_TSIG_SECRET=${KAAS_DNS_TSIG_SECRET:-}
+      - KAAS_DNS_TSIG_ALGO=${KAAS_DNS_TSIG_ALGO:-hmac-sha256}
+      # KAAS_DNS=winrm only: Windows DNS Server refuses wildcard records over RFC 2136 no matter the
+      # zone/auth config, so this drives the DnsServer PowerShell module over WinRM instead - see
+      # internal/dns/winrm's package doc. Its own credential, orthogonal to KAAS_DNS_AUTH above.
+      - KAAS_WINRM_HOST=${KAAS_WINRM_HOST:-}
+      - KAAS_WINRM_PORT=${KAAS_WINRM_PORT:-0}
+      - KAAS_WINRM_INSECURE_HTTP=${KAAS_WINRM_INSECURE_HTTP:-0}
+      - KAAS_WINRM_INSECURE=${KAAS_WINRM_INSECURE:-0}
+      - KAAS_WINRM_USERNAME=${KAAS_WINRM_USERNAME:-}
+      - KAAS_WINRM_PASSWORD=${KAAS_WINRM_PASSWORD:-}
+      # HashiCorp Vault (internal/vault): the worker is the reconciler in real mode, so it holds the
+      # MANAGEMENT token and provisions the mount, policies, identity and per-cluster paths. It shares
+      # the same `vault` service the API mints handoff tokens against - reached over the host (the
+      # worker is --network host), unlike the API's compose-network `vault:8200`.
+      #
+      # NOTE for real ESO: KAAS_VAULT_ADDR is ALSO the address written into each cluster's
+      # ClusterSecretStore, so the in-cluster External Secrets Operator must be able to reach it. For a
+      # real cluster set this to the host's LAN IP (http://<host-ip>:8200), not host.containers.internal.
+      - KAAS_VAULT=${KAAS_VAULT:-real}
+      - KAAS_VAULT_ADDR=${KAAS_VAULT_ADDR:-http://host.containers.internal:8200}
+      - KAAS_VAULT_TOKEN=${KAAS_VAULT_TOKEN:-kaas-root-dev}
+      - KAAS_VAULT_MOUNT=${KAAS_VAULT_MOUNT:-kaas}
+      - KAAS_VAULT_INSECURE=${KAAS_VAULT_INSECURE:-0}
+      # Read-only telemetry seams: the worker is the only container that can reach the cluster API,
+      # so the real (kubectl) collectors MUST run here - otherwise they default to fake and the
+      # portal shows synthetic usage/health that never reflects the real clusters. kubectl ships in
+      # the worker image.
+      - KAAS_METRICS=kubectl
+      - KAAS_HEALTH=kubectl
+      - KAAS_LIBVIRT_MODULE_DIR=/infra/libvirt
+      - KAAS_ANSIBLE_DIR=/ansible
+      - KAAS_WORK_DIR=/work
+      # The OpenTofu libvirt provider reads images from where it runs (this container), so host
+      # paths are bind-mounted below. KAAS_IMAGE_DIR holds the per-(OS,k8s) golden images
+      # (<os>-k8s-<k8s>.qcow2) the provisioner resolves per node; KAAS_BASE_IMAGE is the fallback
+      # for any version not baked there. Bundle upgrades need the image dir populated (make
+      # golden-images) - otherwise a non-default version falls back to the base image.
+      - KAAS_IMAGE_DIR=/srv/images
+      - KAAS_BASE_IMAGE=/srv/base-image.qcow2
+      - KAAS_SSH_PUBLIC_KEY=${KAAS_SSH_PUBLIC_KEY:?set KAAS_SSH_PUBLIC_KEY in .env for real mode}
+      - KAAS_SSH_PRIVATE_KEY_FILE=/keys/id
+      - KAAS_BUDGET_VCPU=${KAAS_BUDGET_VCPU:-16}
+      - KAAS_BUDGET_MEM_MB=${KAAS_BUDGET_MEM_MB:-24576}
+      - LIBVIRT_DEFAULT_URI=qemu:///system
+      # REMOTE KVM HOST (all optional; leave KAAS_KVM_HOST empty for the local hypervisor, which is
+      # the default and changes nothing). Set it and the worker stops assuming the VMs are on this
+      # box: OpenTofu dials libvirtd over qemu+ssh, Ansible hops through the host with a
+      # ProxyCommand, and every kubectl/helm call is routed through an SSH SOCKS tunnel the worker
+      # opens here and binds on the host loopback (see internal/kvmhost + docs/networking.md).
+      # The key below is the PLATFORM's key to the hypervisor - not the cluster-VM key above.
+      - KAAS_KVM_HOST=${KAAS_KVM_HOST:-}
+      - KAAS_KVM_SSH_USER=${KAAS_KVM_SSH_USER:-root}
+      - KAAS_KVM_SSH_PORT=${KAAS_KVM_SSH_PORT:-22}
+      - KAAS_KVM_SSH_KEY_FILE=/keys/kvm
+      # Mounted below only when KAAS_KVM_KNOWN_HOSTS_FILE is set on the host; the container-internal
+      # path is empty otherwise, which is kvmhost's own signal to leave host-key checking disabled.
+      - KAAS_KVM_KNOWN_HOSTS_FILE=${KAAS_KVM_KNOWN_HOSTS_FILE:+/keys/kvm_known_hosts}
+      - KAAS_KVM_SOCKS_ADDR=${KAAS_KVM_SOCKS_ADDR:-}
+      # Sized for the SLOWEST step a reconcile phase can take. Locally that's a `helm --wait`
+      # install (~5m); with a remote KVM host it can instead be EnsureNodes uploading the cluster's
+      # base image over the KAAS_KVM_HOST tunnel, which is minutes-to-an-hour on a slow link. Too
+      # short and the job is SIGKILLed and retried before the upload ever finishes - forever. Bump
+      # this in .env if your link to the hypervisor is slow (see docs/networking.md#remote-kvm-hosts).
+      - KAAS_RECONCILE_JOB_TIMEOUT=${KAAS_RECONCILE_JOB_TIMEOUT:-15m}
+      # Automatic etcd maintenance. Worker-only: the API neither runs the reconcile loop nor invokes
+      # ansible, so nothing here belongs in its environment. All of it is defaulted and none of it
+      # needs to be set - the feature is on out of the box. Defragmentation is stop-the-world for the
+      # member it runs on, so set KAAS_MAINTENANCE_WINDOW if a brief per-member etcd stall (and, on a
+      # SINGLE control plane, a brief API outage) is not acceptable at arbitrary times of day.
+      # An armed NOSPACE alarm bypasses the window - that cluster is already read-only.
+      - KAAS_ETCD_MAINTENANCE=${KAAS_ETCD_MAINTENANCE:-1}
+      - KAAS_ETCD_OBSERVE_INTERVAL=${KAAS_ETCD_OBSERVE_INTERVAL:-6h}
+      - KAAS_ETCD_DEFRAG_RATIO=${KAAS_ETCD_DEFRAG_RATIO:-0.45}
+      - KAAS_ETCD_DEFRAG_MIN_BYTES=${KAAS_ETCD_DEFRAG_MIN_BYTES:-104857600}
+      - KAAS_ETCD_DEFRAG_MIN_INTERVAL=${KAAS_ETCD_DEFRAG_MIN_INTERVAL:-24h}
+      # Baked into every NEW cluster's etcd static pod at kubeadm init/join (the controlplane_etcd
+      # role), and converged onto older members during defragmentation. Raising the backend quota is
+      # the half of this feature that prevents the read-only outage rather than recovering from it.
+      - KAAS_ETCD_QUOTA_BYTES=${KAAS_ETCD_QUOTA_BYTES:-8589934592}
+      - KAAS_ETCD_COMPACTION_RETENTION=${KAAS_ETCD_COMPACTION_RETENTION:-1h}
+      - KAAS_MAINTENANCE_WINDOW=${KAAS_MAINTENANCE_WINDOW:-}
+      - KAAS_MAINTENANCE_TZ=${KAAS_MAINTENANCE_TZ:-}
+      # Periodic control-plane backups. Worker-only, on by default. An online etcd snapshot + the PKI +
+      # kubelet state, sealed and stored in Postgres - the only thing that makes a dead SOLE control
+      # plane recoverable. The interval is also the bound on how much an automatic restore loses.
+      - KAAS_ETCD_SNAPSHOT=${KAAS_ETCD_SNAPSHOT:-1}
+      - KAAS_ETCD_SNAPSHOT_INTERVAL=${KAAS_ETCD_SNAPSHOT_INTERVAL:-6h}
+      - KAAS_ETCD_SNAPSHOT_RETAIN=${KAAS_ETCD_SNAPSHOT_RETAIN:-3}
+      - KAAS_ETCD_SNAPSHOT_MAX_RESTORE_AGE=${KAAS_ETCD_SNAPSHOT_MAX_RESTORE_AGE:-24h}
+      # Automatic cluster and node repair. Worker-only, on by default. Detects a NotReady/down/never-joined
+      # node and escalates through power-on → rejoin → restart-kubelet → rebuild → restore. The guards
+      # (blast-radius caps, quorum, unobservable-cluster, give-up counter) are the load-bearing part -
+      # see docs/architecture.md. On vSphere/Proxmox the power-on rung is unavailable (no power-state
+      # API) and a node with extra disks is refused for replacement (disks are inline VM blocks).
+      - KAAS_REPAIR=${KAAS_REPAIR:-1}
+      - KAAS_REPAIR_REPLACE=${KAAS_REPAIR_REPLACE:-1}
+      - KAAS_REPAIR_RESTORE=${KAAS_REPAIR_RESTORE:-1}
+      - KAAS_REPAIR_INTERVAL=${KAAS_REPAIR_INTERVAL:-2m}
+      - KAAS_REPAIR_HEALTH_MAX_AGE=${KAAS_REPAIR_HEALTH_MAX_AGE:-1m}
+      - KAAS_REPAIR_NOTREADY_GRACE=${KAAS_REPAIR_NOTREADY_GRACE:-10m}
+      - KAAS_REPAIR_STARTUP_GRACE=${KAAS_REPAIR_STARTUP_GRACE:-20m}
+      - KAAS_REPAIR_REPLACE_AFTER=${KAAS_REPAIR_REPLACE_AFTER:-30m}
+      - KAAS_REPAIR_MAX_UNHEALTHY=${KAAS_REPAIR_MAX_UNHEALTHY:-0.5}
+      - KAAS_REPAIR_MAX_UNHEALTHY_CLUSTERS=${KAAS_REPAIR_MAX_UNHEALTHY_CLUSTERS:-0.5}
+      - KAAS_REPAIR_MAX_ATTEMPTS=${KAAS_REPAIR_MAX_ATTEMPTS:-3}
+      - KAAS_REPAIR_BACKOFF=${KAAS_REPAIR_BACKOFF:-30m}
+      # The interactive-shell/kubectl exec agent (bash+kubectl PTY the API proxies to, plus the
+      # Workloads/Monitoring/Security kubectl seams) NO LONGER runs here. It moved to the dedicated,
+      # unprivileged `shell` sandbox below (which binds :8082 on the host) so a user's terminal never
+      # lands on this container - the one holding the libvirt socket, SSH keys, the master
+      # KAAS_SECRET_KEY and the DB. The worker keeps only its own in-process kubectl (metrics/health).
+    volumes:
+      - /run/libvirt:/run/libvirt
+      - ../infra:/infra:ro
+      - ../ansible:/ansible:ro
+      - ../migrations:/migrations:ro
+      # Golden-image directory (make golden-images → GOLDEN_DEST, default /var/lib/libvirt/images).
+      - ${KAAS_IMAGE_DIR:-/var/lib/libvirt/images}:/srv/images:ro
+      - ${KAAS_BASE_IMAGE:?set KAAS_BASE_IMAGE in .env for real mode}:/srv/base-image.qcow2:ro
+      - ${KAAS_SSH_PRIVATE_KEY_FILE:-/dev/null}:/keys/id:ro
+      # The platform's SSH key to a REMOTE KVM host (KAAS_KVM_HOST). Unused - and mounted as an
+      # empty file - in the default local-hypervisor topology.
+      - ${KAAS_KVM_SSH_KEY_FILE:-/dev/null}:/keys/kvm:ro
+      - ${KAAS_KVM_KNOWN_HOSTS_FILE:-/dev/null}:/keys/kvm_known_hosts:ro
+      - workdata:/work
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # The cluster shell/kubectl exec sandbox - the isolated, unprivileged environment a user's Terminal
+  # session (and the Workloads/Monitoring/Security kubectl calls) actually runs in. It is
+  # host-networked, like the worker, ONLY because that is the sole route to the cluster API servers
+  # (docs/networking.md) - but it is stripped of everything that makes the worker dangerous:
+  #
+  #   * image carries only bash + kubectl (deploy/Containerfile.shell) - no OpenTofu/Ansible/Helm,
+  #     no libvirt client;
+  #   * NO secrets in its env: no KAAS_SECRET_KEY (the master key that decrypts every tenant's
+  #     kubeconfig), no DATABASE_URL, no admin password. Each request carries its own kubeconfig, so
+  #     the agent needs none of them;
+  #   * NO sensitive mounts: no /run/libvirt socket, no SSH keys, no infra/ansible trees - only a
+  #     writable tmpfs for per-session scratch;
+  #   * runs non-root, with all Linux capabilities dropped, no-new-privileges, a read-only root
+  #     filesystem, and pid/memory caps to blunt fork bombs.
+  #
+  # Net effect: even if a user escapes kubectl into arbitrary bash, there is nothing confidential on
+  # this host to read and no privilege to abuse. (Production would go further still: a per-session
+  # ephemeral pod and an RBAC-scoped kubeconfig - see internal/shell.)
+  shell:
+    build:
+      context: ..
+      dockerfile: deploy/Containerfile.shell
+    network_mode: host
+    environment:
+      - KAAS_SHELL_LISTEN=:8082
+      - KAAS_WORK_DIR=/work
+      # Shared bearer token the API presents (see the api service). Set it in .env for real use.
+      - KAAS_SHELL_TOKEN=${KAAS_SHELL_TOKEN:-}
+      # kubectl inside this sandbox is a Go binary and honors http_proxy if a corporate-proxied build
+      # host baked one into the image - see the worker service's NO_PROXY comment above. Without this,
+      # every kubectl call this sandbox makes against the cluster API server would get misrouted.
+      - NO_PROXY=${NO_PROXY:-localhost,127.0.0.1,172.23.0.0/16,192.168.122.0/24}
+      - no_proxy=${no_proxy:-localhost,127.0.0.1,172.23.0.0/16,192.168.122.0/24}
+      # With a REMOTE KVM host the cluster subnets are unreachable from here too, so the sandbox's
+      # kubectl goes through the SOCKS tunnel the WORKER holds open - both are host-networked, so
+      # they share this loopback listener. Only where the tunnel is, never the KVM key: the sandbox
+      # stays credential-free by design. Empty (local hypervisor) = direct, exactly as before.
+      - KAAS_KVM_HOST=${KAAS_KVM_HOST:-}
+      - KAAS_KVM_SOCKS_ADDR=${KAAS_KVM_SOCKS_ADDR:-}
+    user: "65534:65534"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 512m
+    tmpfs:
+      # Per-session kubeconfig, HOME and kubectl cache live here - writable, capped, non-persistent
+      # (torn down with the container), and the only writable path given the read-only rootfs.
+      - /work:rw,size=128m,mode=1777
+      - /tmp:rw,size=32m,mode=1777
+
+  # The node-ssh sandbox - the isolated environment a user's per-node SSH session (Nodes tab → SSH)
+  # runs in. Host-networked like the shell sandbox, because reaching cluster VMs on virbr0 is the same
+  # networking problem (docs/networking.md). Its containment story, though, is the INVERSE of the shell
+  # sandbox's, and the difference is the whole point of it being a separate container:
+  #
+  #   * it MUST hold the platform's VM SSH key (/keys/id) - you cannot ssh to a node without it - and,
+  #     for a remote hypervisor, the bastion key too (/keys/kvm). So "no secrets here" is not on offer.
+  #   * instead the IMAGE carries no shell and no kubectl (deploy/Containerfile.nodessh): the only
+  #     program this agent ever starts is `ssh` to a caller-named node IP (internal/nodessh/sshpty).
+  #     There is no session from which to read the key it holds - the user's session IS the ssh client.
+  #   * it still gets NONE of the worker's other power: no /run/libvirt socket, no infra/ansible trees,
+  #     no KAAS_SECRET_KEY, no DATABASE_URL.
+  #   * same hardening as the shell sandbox: non-root, all caps dropped, no-new-privileges, read-only
+  #     rootfs, tmpfs scratch, pid/memory caps.
+  #
+  # Production would not mount a fleet-wide key here at all - it would run an SSH CA and mint a
+  # short-lived, single-node certificate per session (see internal/nodessh).
+  nodessh:
+    build:
+      context: ..
+      dockerfile: deploy/Containerfile.nodessh
+    network_mode: host
+    environment:
+      - KAAS_NODE_SSH_LISTEN=:8084
+      - KAAS_WORK_DIR=/work
+      # Shared bearer token the API presents - DISTINCT from KAAS_SHELL_TOKEN so a leaked shell token
+      # can't open this key-holding sandbox. Set it in .env for real use.
+      - KAAS_NODE_SSH_TOKEN=${KAAS_NODE_SSH_TOKEN:-}
+      # The cluster-VM login and key cloud-init injected - the SAME pair the worker uses for Ansible.
+      - KAAS_SSH_USER=${KAAS_SSH_USER:-kaas}
+      - KAAS_SSH_PRIVATE_KEY_FILE=/keys/id
+      # REMOTE KVM host: when set, the final ssh hop to the VM is chained through the hypervisor as a
+      # bastion (a ProxyCommand built from these, exactly as Ansible's - see internal/kvmhost). The key
+      # below is the PLATFORM's key to the hypervisor, not the cluster-VM key above. All empty/unused in
+      # the default local topology, where the VMs are directly routable.
+      - KAAS_KVM_HOST=${KAAS_KVM_HOST:-}
+      - KAAS_KVM_SSH_USER=${KAAS_KVM_SSH_USER:-root}
+      - KAAS_KVM_SSH_PORT=${KAAS_KVM_SSH_PORT:-22}
+      - KAAS_KVM_SSH_KEY_FILE=/keys/kvm
+      - KAAS_KVM_KNOWN_HOSTS_FILE=${KAAS_KVM_KNOWN_HOSTS_FILE:+/keys/kvm_known_hosts}
+    volumes:
+      # The two SSH keys - and NOTHING else. No libvirt socket, no DB, no infra trees. Both are
+      # read-only; the VM key is required, the bastion key is an empty file in the local topology.
+      - ${KAAS_SSH_PRIVATE_KEY_FILE:-/dev/null}:/keys/id:ro
+      - ${KAAS_KVM_SSH_KEY_FILE:-/dev/null}:/keys/kvm:ro
+      - ${KAAS_KVM_KNOWN_HOSTS_FILE:-/dev/null}:/keys/kvm_known_hosts:ro
+    # Runs as ROOT (the image default) - NOT non-root like the shell sandbox. ssh refuses a key that
+    # is group/other-readable, so the mounted 0600 key is readable only by its owner (container-uid-0
+    # under rootless podman), exactly as the worker holds it. Containment here is "no shell session
+    # ever" + the hardening below, not the uid. See deploy/Containerfile.nodessh.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 512m
+    tmpfs:
+      # Per-session HOME/scratch (sshpty writes a private, empty HOME here); the only writable path
+      # given the read-only rootfs. Non-persistent, torn down with the container.
+      - /work:rw,size=64m,mode=1777
+      - /tmp:rw,size=32m,mode=1777
+
+volumes:
+  workdata:

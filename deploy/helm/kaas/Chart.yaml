@@ -1,0 +1,31 @@
+apiVersion: v2
+name: kaas
+description: |
+  The KaaS-Demo control plane on Kubernetes: the web portal, the JSON+SSE API, the reconciler
+  worker, and the unprivileged cluster-shell exec agent - every one of them horizontally scalable -
+  plus (optionally) the Postgres that holds desired state and the durable job queue.
+type: application
+
+# The chart version tracks the deployment surface; appVersion tracks the platform itself. Both are
+# bumped by hand - this is a demo chart, not a released artifact.
+version: 0.1.0
+appVersion: "0.1.0"
+
+keywords:
+  - kubernetes-as-a-service
+  - control-plane
+  - reconciliation
+home: https://github.com/Daniel-Vaz/KaaS-demo
+sources:
+  - https://github.com/Daniel-Vaz/KaaS-demo
+maintainers:
+  - name: Daniel Vaz
+
+# HashiCorp Vault, deployed alongside the platform (the tenant-facing secret store, internal/vault).
+# Gated on vault.enabled so a deployment can point at an external Vault instead. `helm dependency
+# update deploy/helm/kaas` vendors it into charts/ before install.
+dependencies:
+  - name: vault
+    version: "0.28.1"
+    repository: https://helm.releases.hashicorp.com
+    condition: vault.enabled

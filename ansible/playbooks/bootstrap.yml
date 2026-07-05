@@ -1,0 +1,73 @@
+---
+# Initialize the control plane. Invoked by internal/config/ansible.InitControlPlane with a
+# dynamic inventory + extra-vars (k8s_version, k8s_minor, pod_cidr, svc_cidr, artifacts_dir,
+# and for HA: ha, control_plane_vip, control_plane_endpoint, vrrp_router_id, vrrp_password).
+#
+# Single-node: one play inits the sole control plane. HA: keepalived+haproxy stand up a VIP
+# on every control-plane node first, the FIRST node inits with that VIP as the shared
+# --control-plane-endpoint (uploading certs), and the remaining nodes join as control planes.
+# On a golden image the `common` role is a near no-op.
+#
+# Every play here targets a VM tofu JUST created: `wait_for_lease` only confirms a DHCP lease, not
+# that cloud-init has finished bringing up sshd, so connecting immediately can hit a transient
+# "Connection refused". Each play opens with `wait_for_connection` before anything else, including
+# fact-gathering (needed by the loadbalancer role's keepalived template).
+
+- name: Control-plane load balancer (keepalived VIP + haproxy) - HA only
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  pre_tasks:
+    - name: Wait for SSH (the node may have just been created)
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: 300
+    - name: Gather facts (needed by the loadbalancer role)
+      ansible.builtin.setup:
+      when: ha | default(false) | bool
+  roles:
+    - role: loadbalancer
+      when: ha | default(false) | bool
+
+- name: Bootstrap the first control plane
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  pre_tasks:
+    - name: Wait for SSH (the node may have just been created)
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: 300
+  roles:
+    - common
+    # Write the audit policy + kubeadm apiserver patch before init, so `kubeadm init --patches`
+    # bakes API-server audit logging into this control plane by default.
+    - controlplane_audit
+    # Same idea for etcd: raise the backend-store quota and turn on etcd-side auto-compaction
+    # before init, so the cluster is born with the NOSPACE cliff moved well out of reach.
+    - controlplane_etcd
+    - controlplane
+
+- name: Join the remaining control planes - HA only
+  hosts: control_plane[1:]
+  become: true
+  gather_facts: false
+  vars:
+    # Built on the first control plane by the `controlplane` role (kubeadm join command +
+    # certificate key). Persists across plays as a host fact.
+    join_command: "{{ hostvars[groups['control_plane'][0]]['cp_join_cmd'] | default('') }}"
+  pre_tasks:
+    - name: Wait for SSH (the node may have just been created)
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: 300
+  roles:
+    - role: common
+    # Same audit policy + apiserver patch as the first control plane, so a joining control plane's
+    # apiserver is audited identically (each apiserver audits its own requests).
+    - role: controlplane_audit
+    # Same etcd tuning as the first control plane - quota and compaction are per-member settings,
+    # so an untuned joiner would be the one member that still hits the 2GiB cliff.
+    - role: controlplane_etcd
+    - role: controlplane_join
+      when: ha | default(false) | bool

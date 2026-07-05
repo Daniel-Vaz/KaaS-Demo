@@ -1,0 +1,124 @@
+---
+# One extra disk: raw device -> PV -> VG -> LV -> filesystem -> mount. Included once per disk from
+# main.yml with `disk` set to its definition.
+#
+# Each disk gets its OWN volume group ("kaas-<name>") holding one logical volume ("data"). One VG per
+# disk rather than one shared VG per node is deliberate: no LV can span another disk's extents, so
+# each disk stays independently removable - which is precisely what remove-node-disks.yml needs to
+# tear one down without disturbing the others. LVM (rather than a bare partition) is what makes later
+# growth possible - add a PV, lvextend, resize - without re-laying the filesystem.
+#
+# IDEMPOTENCY is the whole game: this re-runs on every reconcile tick of a cluster that has disks, so
+# each step is an explicit "check, then act" pair. There is no community.general.lvg/filesystem/mount
+# to lean on - the repo uses ansible.builtin ONLY, so `ansible-playbook --syntax-check` works with no
+# collections installed - and the LVM tools mostly fail (rather than no-op) when the object already
+# exists, so the checks are load-bearing rather than cosmetic.
+
+- name: Resolve {{ disk.name }} to its stable device path
+  # The by-id symlink is the ONLY safe handle. Kernel names (/dev/sdb…) are assigned in attach order
+  # and renumber when a disk is detached, so "the second disk" is not a stable idea - a role that
+  # trusted one would eventually format the wrong device. device_id is the identity the provisioner
+  # reported (kvm: the wwn the platform pinned; vsphere: the VMDK's uuid, surfaced by
+  # enable_disk_uuid) and it appears inside the by-id entry's name.
+  #
+  # -part* entries are partitions of a device; we want the whole disk. Fails loudly when nothing
+  # matches rather than falling back to a guess: a wrong guess here destroys data.
+  ansible.builtin.shell: |
+    set -o pipefail
+    link=$(ls -1 /dev/disk/by-id/ 2>/dev/null | grep -i -- '{{ disk.device_id }}' | grep -v -- '-part' | head -n1)
+    if [ -z "$link" ]; then
+      echo "no /dev/disk/by-id entry matches device id '{{ disk.device_id }}' for disk '{{ disk.name }}'" >&2
+      exit 1
+    fi
+    readlink -f "/dev/disk/by-id/$link"
+  args:
+    executable: /bin/bash
+  register: disk_dev
+  changed_when: false
+
+- name: Note the resolved device for {{ disk.name }}
+  ansible.builtin.set_fact:
+    disk_device: "{{ disk_dev.stdout | trim }}"
+    disk_vg: "kaas-{{ disk.name }}"
+
+- name: Check whether {{ disk_device }} is already a physical volume
+  ansible.builtin.command: "pvs --noheadings -o pv_name {{ disk_device }}"
+  register: pv_check
+  failed_when: false
+  changed_when: false
+
+- name: Create the physical volume on {{ disk_device }}
+  ansible.builtin.command: "pvcreate --yes {{ disk_device }}"
+  when: pv_check.rc != 0
+  changed_when: true
+
+- name: Check whether volume group {{ disk_vg }} exists
+  ansible.builtin.command: "vgs --noheadings -o vg_name {{ disk_vg }}"
+  register: vg_check
+  failed_when: false
+  changed_when: false
+
+- name: Create volume group {{ disk_vg }}
+  ansible.builtin.command: "vgcreate {{ disk_vg }} {{ disk_device }}"
+  when: vg_check.rc != 0
+  changed_when: true
+
+- name: Check whether logical volume {{ disk_vg }}/data exists
+  ansible.builtin.command: "lvs --noheadings -o lv_name {{ disk_vg }}/data"
+  register: lv_check
+  failed_when: false
+  changed_when: false
+
+- name: Create logical volume {{ disk_vg }}/data
+  # 100%FREE: one LV filling the disk. Sizing knobs are not exposed - the disk's size IS the unit the
+  # user asked for.
+  ansible.builtin.command: "lvcreate --yes -l 100%FREE -n data {{ disk_vg }}"
+  when: lv_check.rc != 0
+  changed_when: true
+
+- name: Check for an existing filesystem on {{ disk_vg }}/data
+  # THE guard on mkfs. blkid prints the filesystem type; empty output means the LV is blank and safe
+  # to format. Without this, every reconcile tick would re-mkfs a mounted data disk and destroy
+  # everything on it.
+  ansible.builtin.command: "blkid -o value -s TYPE /dev/{{ disk_vg }}/data"
+  register: fs_check
+  failed_when: false
+  changed_when: false
+
+- name: Create the {{ disk.fs_type }} filesystem on {{ disk_vg }}/data
+  ansible.builtin.command: "mkfs.{{ disk.fs_type }} /dev/{{ disk_vg }}/data"
+  when: fs_check.stdout | trim | length == 0
+  changed_when: true
+
+- name: Create the mount point {{ disk.mount_path }}
+  ansible.builtin.file:
+    path: "{{ disk.mount_path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Persist {{ disk.mount_path }} in /etc/fstab
+  # By the LVM device path rather than a kernel name: /dev/kaas-<disk>/data is stable across reboots
+  # and across the disk coming back at a different bus address.
+  #
+  # `nofail` is load-bearing. An extra disk is user-managed and may be detached out of band, or the
+  # platform may be part-way through removing it. Without nofail, a missing disk drops the whole node
+  # into emergency mode at boot - one user's storage mistake would cost them the node.
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    regexp: "^/dev/{{ disk_vg }}/data[[:space:]]"
+    line: "/dev/{{ disk_vg }}/data {{ disk.mount_path }} {{ disk.fs_type }} defaults,nofail 0 2"
+    state: present
+
+- name: Check whether {{ disk.mount_path }} is already mounted
+  ansible.builtin.command: "mountpoint -q {{ disk.mount_path }}"
+  register: mount_check
+  failed_when: false
+  changed_when: false
+
+- name: Mount {{ disk.mount_path }}
+  # No target: mount reads the fstab entry written above, so the two can never disagree.
+  ansible.builtin.command: "mount {{ disk.mount_path }}"
+  when: mount_check.rc != 0
+  changed_when: true

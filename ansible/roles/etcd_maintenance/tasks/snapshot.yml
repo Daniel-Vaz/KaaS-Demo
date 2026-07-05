@@ -1,0 +1,117 @@
+---
+# Take a control-plane backup and hand it to the controller: an `etcdctl snapshot save` of the
+# keyspace, plus the cluster PKI and the kubelet's own state directory.
+#
+# WHY THIS IS NOT backup-controlplane.yml. That play takes a RAW COPY of /var/lib/etcd, which is only
+# consistent if etcd is stopped - so it removes the etcd static manifest, waits for the port to close,
+# and stops kubelet. Entirely correct there: it runs immediately before the node is destroyed and
+# rebuilt, so the outage it causes is one the node was about to have anyway. It is completely unusable
+# on a cadence: it would stop the control plane of every healthy cluster on the platform every few
+# hours. `etcdctl snapshot save` is the online equivalent - etcd streams a consistent view of its own
+# keyspace while continuing to serve - which is what makes a periodic backup possible at all.
+#
+# WHY THE PKI RIDES ALONG, and is not optional: a keyspace snapshot cannot rebuild a control plane on
+# its own. Without the ORIGINAL CA private key the restored API server serves a different CA, and
+# every kubelet client certificate, every per-user kubeconfig and every cert-subject-keyed
+# ClusterRoleBinding stops verifying. /var/lib/kubelet comes too for the same reason it does in
+# backup-controlplane.yml: a fresh VM's kubelet has never run kubeadm, so without it there is no
+# config.yaml and kubelet refuses to start.
+#
+# Everything here is read-only with respect to the running cluster. Nothing is stopped, nothing is
+# moved, and a failed run leaves the node exactly as it found it.
+
+- name: Resolve this node's etcd pod
+  ansible.builtin.import_tasks: pod.yml
+
+- name: Take an online etcd snapshot
+  # Written under /var/lib/etcd because that path is bind-mounted into the etcd static pod from the
+  # host, so the file etcdctl writes INSIDE the container is the file the host tasks below can read.
+  # It is the one directory guaranteed to be shared, and it costs nothing: the file is removed again
+  # at the end of this play.
+  ansible.builtin.command: >
+    kubectl --kubeconfig {{ kubeconfig }} -n kube-system exec {{ etcd_pod }} --
+    etcdctl {{ etcd_certs }} snapshot save {{ etcd_snapshot_path }}
+  register: etcd_snapshot_save
+  until: etcd_snapshot_save.rc == 0
+  retries: 3
+  delay: 10
+  changed_when: true
+
+- name: Verify the snapshot and read back its revision and hash
+  # A snapshot that cannot be read back is not a backup, and storing one would be worse than storing
+  # nothing: it would satisfy the retention policy, silence the staleness health check, and fail at
+  # the only moment it is ever used. The Go side refuses to store a snapshot this step could not
+  # verify (see internal/config/ansible.SnapshotEtcd).
+  #
+  # etcdutl is where snapshot tooling lives from etcd 3.5 on; `etcdctl snapshot status` still works
+  # there but is deprecated and gone in 3.6, so prefer etcdutl and fall back.
+  ansible.builtin.shell: |
+    set -euo pipefail
+    kubectl --kubeconfig {{ kubeconfig }} -n kube-system exec {{ etcd_pod }} -- \
+      etcdutl snapshot status {{ etcd_snapshot_path }} -w json 2>/dev/null \
+    || kubectl --kubeconfig {{ kubeconfig }} -n kube-system exec {{ etcd_pod }} -- \
+      etcdctl snapshot status {{ etcd_snapshot_path }} -w json
+  args:
+    executable: /bin/bash
+  register: etcd_snapshot_status
+  changed_when: false
+
+- name: Archive the cluster PKI and kubeconfigs
+  # A live copy, no quiescing: these are files kubeadm wrote once and only rewrites on a cert renewal
+  # or an upgrade, so reading them from under a running control plane is safe.
+  ansible.builtin.command: tar czf /root/kaas-snap-kube-etc.tar.gz -C / etc/kubernetes
+  changed_when: true
+
+- name: Archive the kubelet state directory (config.yaml, client certs)
+  # --exclude=./pods drops the ephemeral per-pod state, which is large, worthless to a restore, and
+  # changes under the tar as it runs.
+  ansible.builtin.command: tar czf /root/kaas-snap-kubelet.tar.gz --exclude=./pods -C /var/lib kubelet
+  changed_when: true
+
+- name: Collect the snapshot and archives into one bundle
+  # One artifact rather than three, because the controller seals and stores it as a single opaque
+  # blob - the store's payload column is the whole backup or nothing.
+  ansible.builtin.shell: |
+    set -euo pipefail
+    rm -rf /root/kaas-snap && mkdir -p /root/kaas-snap
+    cp {{ etcd_snapshot_path }} /root/kaas-snap/snapshot.db
+    mv /root/kaas-snap-kube-etc.tar.gz /root/kaas-snap/kube-etc.tar.gz
+    mv /root/kaas-snap-kubelet.tar.gz /root/kaas-snap/kubelet.tar.gz
+    tar czf /root/kaas-snapshot-bundle.tar.gz -C /root/kaas-snap .
+  args:
+    executable: /bin/bash
+  changed_when: true
+
+- name: Ensure artifacts dir exists on the controller
+  ansible.builtin.file:
+    path: "{{ artifacts_dir }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  become: false
+
+- name: Fetch the bundle to the controller
+  ansible.builtin.fetch:
+    src: /root/kaas-snapshot-bundle.tar.gz
+    dest: "{{ artifacts_dir }}/etcd-snapshot-bundle.tar.gz"
+    flat: true
+
+- name: Save the verified snapshot status to the controller
+  ansible.builtin.copy:
+    content: "{{ etcd_snapshot_status.stdout }}\n"
+    dest: "{{ artifacts_dir }}/etcd-snapshot-status.json"
+    mode: '0600'
+  delegate_to: localhost
+  become: false
+
+- name: Remove the snapshot and staging directory from the node
+  # The bundle is on the controller now. Leaving a copy of the cluster's entire keyspace - every
+  # Secret in plaintext - lying in /var/lib/etcd and /root on the node would hand it to anyone who
+  # ever gets a shell there, which is precisely what the sealed store exists to avoid.
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ etcd_snapshot_path }}"
+    - /root/kaas-snap
+    - /root/kaas-snapshot-bundle.tar.gz

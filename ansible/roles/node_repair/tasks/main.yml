@@ -1,0 +1,49 @@
+---
+# Restart the kubelet (and the container runtime under it) on one node - the cheapest rung of
+# automatic node repair, and the fix for the large majority of NotReady nodes: a kubelet that has
+# hung, lost its connection to containerd, or wedged on a bad pod sandbox.
+#
+# Deliberately narrow. This role does NOT try to diagnose, does not touch the cluster's view of the
+# node (no cordon, no drain - the node is already not serving), and does not reach for anything more
+# forceful. Everything above this rung is the reconciler's decision to escalate, not a shell
+# command's, and a repair role that quietly does more than its name is how a "restart kubelet" turns
+# into an outage nobody ordered.
+#
+# Invoked by internal/config/ansible.RestartKubelet via repair-node.yml, against a single host.
+
+- name: Restart containerd
+  # First: kubelet talks to containerd over a socket, and a kubelet that is wedged is very often
+  # wedged ON that socket. Restarting kubelet alone would reconnect it to the same stuck runtime.
+  # Running containers survive - containerd's shims are separate processes, which is exactly why
+  # this is a safe thing to do to a node that may still be running workloads.
+  ansible.builtin.systemd:
+    name: containerd
+    state: restarted
+  register: containerd_restart
+  failed_when: false
+
+- name: Report the containerd restart
+  # Not fatal: some images run a different runtime, and the kubelet restart below is the operation
+  # that actually matters. Surfacing it keeps a silent no-op from looking like a success.
+  ansible.builtin.debug:
+    msg: "containerd restart {{ 'succeeded' if containerd_restart is not failed else 'failed - continuing to kubelet' }}"
+
+- name: Restart kubelet
+  ansible.builtin.systemd:
+    name: kubelet
+    state: restarted
+    enabled: true
+
+- name: Wait for kubelet to report healthy
+  # kubelet's own healthz on loopback, not the cluster's view of the node. Two reasons: it answers
+  # in seconds where the node's Ready condition takes up to 40s more to propagate, and it is
+  # reachable from the node itself even when the API server is the thing that is unreachable -
+  # which is one of the states this repair runs in.
+  ansible.builtin.uri:
+    url: http://127.0.0.1:10248/healthz
+    return_content: true
+  register: kubelet_health
+  until: kubelet_health.status == 200
+  retries: 30
+  delay: 5
+  changed_when: false

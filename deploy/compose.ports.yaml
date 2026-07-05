@@ -1,0 +1,24 @@
+# Host port publishing for the SINGLE-REPLICA bring-ups (`make up`, `make up-fake`).
+#
+# This is a separate overlay because a fixed host port and horizontal scaling are mutually
+# exclusive: only one container can hold :8080, so a published port silently caps that service at
+# one replica. Keeping the mappings out of compose.yaml lets `make up-scale` swap them for a load
+# balancer (deploy/compose.scale.yaml) instead of inheriting a constraint it cannot drop - compose
+# merges `ports` by appending, so an overlay can add mappings but never remove them.
+name: kaas-demo
+
+services:
+  # The browser front door.
+  web:
+    ports:
+      - "8080:80"
+
+  # Direct API access for curl and scripts/teardown-clusters.sh; browsers go through `web`.
+  api:
+    ports:
+      - "8081:8080"
+
+  # The Vault UI, so the Secrets page's "View in Vault" deep-link resolves in the browser.
+  vault:
+    ports:
+      - "8200:8200"

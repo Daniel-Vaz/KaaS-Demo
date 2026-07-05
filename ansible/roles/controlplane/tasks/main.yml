@@ -1,0 +1,96 @@
+---
+# Initialize the FIRST control plane with kubeadm, then hand the admin kubeconfig and a worker
+# join command back to the controller (the Go wrapper reads them from artifacts_dir). For an
+# HA cluster it inits against the shared VIP endpoint, uploads the control-plane certs, and
+# builds the join command the other control planes use.
+
+- name: Check whether the control plane is already initialized
+  ansible.builtin.stat:
+    path: /etc/kubernetes/admin.conf
+  register: admin_conf
+
+- name: kubeadm init (single-node control plane)
+  # --patches applies the controlplane_audit role's kube-apiserver patch (audit policy + stdout
+  # audit backend) to the generated static pod. --node-name pins the Kubernetes node name to the
+  # VM name the platform minted (inventory_hostname) rather than whatever the guest OS hostname
+  # happens to be - load-bearing on Proxmox, where native cloud-init sets the guest hostname from
+  # the Proxmox VM object name (itself prefixed with the cluster id for PVE-wide uniqueness), which
+  # would otherwise leak into the k8s node name and break every kubectl/Ansible lookup keyed on
+  # inventory_hostname (this wait, the upgrade role's drain/uncordon, node_disks, …). Harmless
+  # elsewhere: on kvm/vsphere the guest hostname already equals inventory_hostname.
+  ansible.builtin.command: >
+    kubeadm init
+    --kubernetes-version {{ k8s_version }}
+    --pod-network-cidr {{ pod_cidr }}
+    --service-cidr {{ svc_cidr }}
+    --apiserver-advertise-address {{ ansible_host | default(ansible_default_ipv4.address) }}
+    --node-name {{ inventory_hostname }}
+    --patches /etc/kubernetes/patches
+  register: kubeadm_init_single
+  when:
+    - not admin_conf.stat.exists
+    - not (ha | default(false) | bool)
+
+- name: kubeadm init (HA - shared endpoint + uploaded certs)
+  # --control-plane-endpoint pins the API to the keepalived VIP (added to the apiserver cert
+  # SANs), so admin.conf and every join target the VIP; --upload-certs stages the shared certs
+  # in a Secret so the other control planes can pull them with a certificate key. --node-name: see
+  # the single-node task above.
+  ansible.builtin.command: >
+    kubeadm init
+    --kubernetes-version {{ k8s_version }}
+    --pod-network-cidr {{ pod_cidr }}
+    --service-cidr {{ svc_cidr }}
+    --control-plane-endpoint {{ control_plane_endpoint }}
+    --apiserver-advertise-address {{ ansible_host | default(ansible_default_ipv4.address) }}
+    --upload-certs
+    --node-name {{ inventory_hostname }}
+    --patches /etc/kubernetes/patches
+  register: kubeadm_init_ha
+  when:
+    - not admin_conf.stat.exists
+    - ha | default(false) | bool
+
+- name: Ensure artifacts dir exists on the controller
+  ansible.builtin.file:
+    path: "{{ artifacts_dir }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  become: false
+
+- name: Fetch admin kubeconfig back to the controller
+  ansible.builtin.fetch:
+    src: /etc/kubernetes/admin.conf
+    dest: "{{ artifacts_dir }}/admin.conf"
+    flat: true
+
+- name: Create a worker join command
+  ansible.builtin.command: kubeadm token create --print-join-command
+  register: join_cmd
+  changed_when: false
+
+- name: Save the join command on the controller
+  ansible.builtin.copy:
+    content: "{{ join_cmd.stdout }}\n"
+    dest: "{{ artifacts_dir }}/join.sh"
+    mode: '0700'
+  delegate_to: localhost
+  become: false
+
+# --- HA only: build the control-plane join command for the other control planes ------------
+
+- name: Re-upload control-plane certs to mint a certificate key (HA)
+  # Idempotent and re-runnable: unlike the one-shot key printed by `kubeadm init`, this always
+  # produces a fresh key (older uploads expire ~2h), so control-plane scale-out/retries work.
+  ansible.builtin.command: kubeadm init phase upload-certs --upload-certs
+  register: upload_certs
+  changed_when: false
+  when: ha | default(false) | bool
+
+- name: Build the control-plane join command (HA)
+  # Appends the --control-plane flag + certificate key (last line of the upload-certs output)
+  # to the standard worker join command. The joining node adds its own advertise address.
+  ansible.builtin.set_fact:
+    cp_join_cmd: "{{ join_cmd.stdout }} --control-plane --certificate-key {{ upload_certs.stdout_lines[-1] | trim }}"
+  when: ha | default(false) | bool

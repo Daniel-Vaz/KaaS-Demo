@@ -1,0 +1,17 @@
+---
+# Read-only: report the earliest control-plane certificate expiry to the controller. Invoked by
+# internal/config/ansible.CertExpiry with extra-vars artifacts_dir, to observe/backfill
+# domain.Cluster.CertNotAfter and to feed the certificate health check. It renews nothing.
+#
+# The role's tasks are pulled in with import_role + tasks_from - NOT the play-level `roles:` keyword,
+# which silently ignores tasks_from (ansible-core treats it as a role var and loads tasks/main.yml,
+# which this role doesn't have), so the play would run zero tasks.
+- name: Report control-plane certificate expiry
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Observe the earliest control-plane certificate expiry
+      ansible.builtin.import_role:
+        name: renew_certs
+        tasks_from: expiry.yml

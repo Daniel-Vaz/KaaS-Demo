@@ -1,0 +1,45 @@
+---
+# Converge this member's etcd backend tuning onto the live static-pod manifest.
+#
+# New clusters get these flags from the controlplane_etcd role, baked in by `kubeadm init/join
+# --patches`. A cluster bootstrapped BEFORE that role existed has neither, and is therefore running
+# against etcd's 2GiB default quota - exactly the cluster most likely to go read-only. Editing the
+# manifest is how it converges, and it costs an etcd restart (kubelet watches the directory), which
+# is why it lives HERE, inside a play that is already serialized one member at a time behind a
+# quorum gate, rather than firing unannounced on a Ready tick.
+#
+# Idempotent and restart-free once converged: lineinfile's regexp rewrites the flag IN PLACE when it
+# is already present, so a matching value is a no-op and kubelet never sees a changed file. Matching
+# by regexp instead of blindly inserting also avoids appending a second, later-and-therefore-winning
+# copy of the same flag - the bug control_plane_metrics hit with --listen-metrics-urls.
+
+- name: Set etcd's backend-store quota
+  ansible.builtin.lineinfile:
+    path: /etc/kubernetes/manifests/etcd.yaml
+    regexp: '^\s*- --quota-backend-bytes=.*$'
+    line: '    - --quota-backend-bytes={{ etcd_quota_backend_bytes }}'
+    insertafter: '^\s*- etcd\s*$'
+  register: etcd_quota_flag
+
+- name: Turn on etcd-side periodic auto-compaction
+  ansible.builtin.lineinfile:
+    path: /etc/kubernetes/manifests/etcd.yaml
+    regexp: '^\s*- --auto-compaction-mode=.*$'
+    line: '    - --auto-compaction-mode=periodic'
+    insertafter: '^\s*- etcd\s*$'
+  register: etcd_compaction_mode_flag
+
+- name: Set etcd's auto-compaction retention
+  ansible.builtin.lineinfile:
+    path: /etc/kubernetes/manifests/etcd.yaml
+    regexp: '^\s*- --auto-compaction-retention=.*$'
+    line: '    - --auto-compaction-retention={{ etcd_auto_compaction_retention }}'
+    insertafter: '^\s*- etcd\s*$'
+  register: etcd_compaction_retention_flag
+
+- name: Note that this member's etcd is restarting to pick up the new flags
+  ansible.builtin.debug:
+    msg: >-
+      etcd tuning changed on {{ inventory_hostname }} - the member is restarting;
+      the health gate below holds the play until it rejoins quorum.
+  when: etcd_quota_flag.changed or etcd_compaction_mode_flag.changed or etcd_compaction_retention_flag.changed

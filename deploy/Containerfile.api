@@ -1,0 +1,32 @@
+# Build the API (control-plane JSON + SSE server) as a static binary in a minimal image. The
+# catalog (catalog.json) is compiled in via go:embed; migrations are read at runtime from
+# KAAS_MIGRATIONS_DIR (mounted by compose). The UI is the separate web portal (deploy/Containerfile.web).
+FROM docker.io/library/golang:1.26 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/api ./cmd/api
+
+# Helm is bundled for the add-on values editor (KAAS_ADDON_VALUES=helm): `helm show values` reads
+# chart repos over the network, needs no cluster, and so runs API-side. The statically-linked helm
+# binary runs fine in distroless/static; its cache/config/data are redirected to /tmp below since the
+# distroless nonroot user has no writable $HOME.
+ARG HELM_VERSION=3.16.4
+RUN curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" -o /tmp/helm.tgz \
+ && tar -xzf /tmp/helm.tgz -C /tmp linux-amd64/helm
+
+FROM gcr.io/distroless/static-debian12
+COPY --from=build /out/api /api
+COPY --from=build /tmp/linux-amd64/helm /usr/local/bin/helm
+# The schema migrations are BAKED IN, not only mounted: compose bind-mounts ../migrations over this
+# path (so edits need no rebuild), but Kubernetes has no bind mounts - the Helm chart in
+# deploy/helm runs this same image with nothing mounted, so the image has to be self-contained.
+COPY migrations /migrations
+ENV KAAS_MIGRATIONS_DIR=/migrations \
+    HELM_CACHE_HOME=/tmp/helm/cache \
+    HELM_CONFIG_HOME=/tmp/helm/config \
+    HELM_DATA_HOME=/tmp/helm/data
+EXPOSE 8080
+USER nonroot:nonroot
+ENTRYPOINT ["/api"]

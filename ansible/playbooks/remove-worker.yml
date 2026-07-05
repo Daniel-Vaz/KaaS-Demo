@@ -1,0 +1,28 @@
+---
+# Scale-down: drain and delete the given worker nodes from the cluster so kubeadm forgets
+# them before their VMs are destroyed (otherwise a stale, NotReady node lingers in
+# `kubectl get nodes`). Runs entirely from the control plane by node name, so it works even
+# if the target VM is already unreachable. Invoked by config/ansible.RemoveWorkers with
+# extra-var `remove_nodes` (a list of node/VM names). Idempotent: delete tolerates absence.
+- name: Remove workers from the cluster
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  vars:
+    kubeconfig: /etc/kubernetes/admin.conf
+  tasks:
+    - name: Cordon and drain each node
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig }} drain {{ item }}
+        --ignore-daemonsets --delete-emptydir-data --force --timeout=120s
+      loop: "{{ remove_nodes }}"
+      register: drain
+      # A gone/unreachable node can't be drained cleanly; proceed to delete regardless.
+      failed_when: false
+      changed_when: "'drained' in (drain.stdout | default(''))"
+
+    - name: Delete each node object
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig }} delete node {{ item }} --ignore-not-found
+      loop: "{{ remove_nodes }}"
+      changed_when: true

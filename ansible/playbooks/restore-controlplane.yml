@@ -1,0 +1,110 @@
+---
+# Single-node control-plane OS upgrade, step 2 of 2: rebuild the control plane on the replacement
+# VM. Invoked by internal/config/ansible.RestoreControlPlane with extra-vars target_node, target_ip,
+# artifacts_dir, k8s_version, k8s_minor. The new VM reclaimed the old node's IP (pinned MAC), so the
+# restored certs and etcd member (both keyed on that IP) are still valid - we drop the raw etcd
+# data, /etc/kubernetes, AND kubelet's own state directory back (the fresh VM's kubelet has never
+# run kubeadm init/join, so without /var/lib/kubelet it has no config.yaml and refuses to start) and
+# start kubelet, which brings the static control-plane pods up.
+#
+# Idempotent: guarded by /etc/kubernetes/restore.done so a retry after success is a no-op.
+#
+# The replacement node was just (re)created: tofu's wait_for_lease only confirms a DHCP lease, not
+# that cloud-init has finished bringing up sshd, so connecting immediately can hit a transient
+# "Connection refused". wait_for_connection blocks until it genuinely accepts SSH before anything
+# else runs.
+- name: Restore the control plane onto the replacement node
+  hosts: "{{ target_node | default('control_plane') }}"
+  become: true
+  gather_facts: false
+  pre_tasks:
+    - name: Wait for SSH (the node may have just been (re)created)
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: 300
+  roles:
+    - common
+  tasks:
+    - name: Check whether the control plane has already been restored
+      ansible.builtin.stat:
+        path: /etc/kubernetes/restore.done
+      register: restored
+
+    - name: Restore etcd + /etc/kubernetes and start the control plane
+      when: not restored.stat.exists
+      block:
+        - name: Copy the /etc/kubernetes archive to the node
+          ansible.builtin.copy:
+            src: "{{ artifacts_dir }}/kube-etc.tar.gz"
+            dest: /root/kube-etc.tar.gz
+            mode: '0600'
+
+        - name: Copy the etcd data archive to the node
+          ansible.builtin.copy:
+            src: "{{ artifacts_dir }}/etcd-data.tar.gz"
+            dest: /root/etcd-data.tar.gz
+            mode: '0600'
+
+        - name: Copy the kubelet state archive to the node
+          ansible.builtin.copy:
+            src: "{{ artifacts_dir }}/kubelet-data.tar.gz"
+            dest: /root/kubelet-data.tar.gz
+            mode: '0600'
+
+        - name: Stop kubelet while restoring
+          ansible.builtin.systemd:
+            name: kubelet
+            state: stopped
+
+        - name: Restore /etc/kubernetes (pki, manifests, kubeconfigs)
+          ansible.builtin.shell: |
+            set -e
+            rm -rf /etc/kubernetes
+            tar xzf /root/kube-etc.tar.gz -C /
+          changed_when: true
+
+        - name: Restore the raw etcd data directory
+          # Same member data as before; the node's IP/hostname are unchanged, so etcd comes back up
+          # as the same single member with no snapshot-restore ceremony (and no etcdctl needed).
+          ansible.builtin.shell: |
+            set -e
+            rm -rf /var/lib/etcd
+            tar xzf /root/etcd-data.tar.gz -C /var/lib
+          changed_when: true
+
+        - name: Restore the kubelet state directory (config.yaml, client certs)
+          ansible.builtin.shell: |
+            set -e
+            rm -rf /var/lib/kubelet
+            tar xzf /root/kubelet-data.tar.gz -C /var/lib
+          changed_when: true
+
+        - name: Start kubelet (brings up the restored static control-plane pods)
+          ansible.builtin.systemd:
+            name: kubelet
+            state: started
+            enabled: true
+
+        - name: Wait for the API server to become healthy
+          ansible.builtin.command: kubectl --kubeconfig /etc/kubernetes/admin.conf get --raw=/healthz
+          register: healthz
+          until: healthz.rc == 0 and healthz.stdout == 'ok'
+          retries: 30
+          delay: 10
+          changed_when: false
+
+        # /healthz only confirms the API server itself; Ready additionally needs kubelet + the CNI
+        # to be up. The reconciler treats this hop as done once RestoreControlPlane returns, so
+        # waiting here means it doesn't move on (e.g. to finalizing the upgrade) before the cluster
+        # is genuinely serving.
+        - name: Wait for this control plane's node to report Ready
+          ansible.builtin.command: >
+            kubectl --kubeconfig /etc/kubernetes/admin.conf wait node/{{ target_node }}
+            --for=condition=Ready --timeout=300s
+          changed_when: false
+
+        - name: Mark the restore complete
+          ansible.builtin.file:
+            path: /etc/kubernetes/restore.done
+            state: touch
+            mode: '0644'

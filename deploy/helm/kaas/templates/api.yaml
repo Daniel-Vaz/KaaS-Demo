@@ -1,0 +1,250 @@
+{{/*
+The control-plane API: the JSON + SSE surface. It is a pure HTTP tier -
+
+  * it NEVER touches KVM (provisioner/config/add-on seams are pinned fake here, exactly as in
+    compose): the worker owns all infrastructure, and KAAS_DISABLE_RECONCILER keeps this process
+    out of the reconcile loop entirely;
+  * it holds no per-request state, so replicas need no sticky routing: sessions are signed cookies,
+    and the live event stream arrives via Postgres LISTEN/NOTIFY, so an SSE client on ANY replica
+    sees events emitted by ANY worker;
+  * real cluster access (Terminal, Workloads, Monitoring, Security) is forwarded to the shell exec
+    agent Service, which load-balances over the agent replicas.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kaas.fullname" . }}-api
+  labels:
+    {{- include "kaas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  {{- if not .Values.api.autoscaling.enabled }}
+  replicas: {{ .Values.api.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "kaas.selectorLabels" (dict "ctx" . "component" "api") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kaas.labels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+      annotations:
+        # Roll the pods when the credentials change (a new master key must reach every replica).
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- if eq .Values.auth.mode "ldap" }}
+        # ...and when the mapping rules change. The config is read once at boot (it seeds the
+        # directory's groups), so without this a rule edit would sit in the ConfigMap doing nothing
+        # until something unrelated happened to restart the pods.
+        checksum/ldap-config: {{ include (print $.Template.BasePath "/ldap-configmap.yaml") . | sha256sum }}
+        {{- end }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        # 65532 is distroless's `nonroot`. It has to be spelled out as a NUMBER: the image declares
+        # its user by name, and the kubelet cannot verify a named user is non-root, so with
+        # runAsNonRoot alone the container never starts ("non-numeric user (nonroot)").
+        runAsUser: 65532
+        runAsGroup: 65532
+      containers:
+        - name: api
+          image: {{ include "kaas.image" (dict "ctx" . "component" "api") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            {{- include "kaas.commonEnv" . | nindent 12 }}
+            - name: KAAS_ADDR
+              value: ":8080"
+            # The API is the one process that must NOT reconcile: the worker owns the loop (it is
+            # the only one that can reach libvirt and the cluster VMs). This also keeps every API
+            # replica from starting a River client - and its schema migrator - at boot.
+            - name: KAAS_DISABLE_RECONCILER
+              value: "1"
+            # Hardcoded fake, as in compose: the API must never pick up a real provisioner.
+            - name: KAAS_PROVISIONER
+              value: fake
+            - name: KAAS_CONFIG
+              value: fake
+            - name: KAAS_ADDONS
+              value: fake
+            {{- if eq (include "kaas.real" .) "true" }}
+            # The request-driven query seams, all proxied to the exec-agent Service. Kubernetes
+            # load-balances the Service across the agent replicas, so the API needs no list here.
+            - name: KAAS_SHELL
+              value: worker
+            - name: KAAS_KUBE
+              value: worker
+            - name: KAAS_MONITORING
+              value: worker
+            - name: KAAS_SECURITY
+              value: worker
+            - name: KAAS_AUDIT
+              value: worker
+            - name: KAAS_TUNNEL
+              value: worker
+            - name: KAAS_SHELL_AGENT_ADDR
+              value: {{ printf "%s-shell:8082" (include "kaas.fullname" .) | quote }}
+            - name: KAAS_SHELL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kaas.secretName" . }}
+                  key: kaas-shell-token
+            # Node SSH (Nodes tab) proxies to a SEPARATE sandbox Service - the one that holds the VM
+            # key and runs no PTY (nodessh.yaml). Its own bearer token, distinct from the shell's.
+            - name: KAAS_NODE_SSH
+              value: agent
+            - name: KAAS_NODE_SSH_AGENT_ADDR
+              value: {{ printf "%s-nodessh:8084" (include "kaas.fullname" .) | quote }}
+            - name: KAAS_NODE_SSH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kaas.secretName" . }}
+                  key: kaas-node-ssh-token
+            {{- else }}
+            # providers=fake: there are no real clusters to reach, so the API serves the simulated
+            # Terminal/Workloads/Monitoring/Security/Audit seams in-process and no exec agent is deployed.
+            - name: KAAS_SHELL
+              value: fake
+            - name: KAAS_KUBE
+              value: fake
+            - name: KAAS_MONITORING
+              value: fake
+            - name: KAAS_SECURITY
+              value: fake
+            - name: KAAS_AUDIT
+              value: fake
+            - name: KAAS_TUNNEL
+              value: fake
+            - name: KAAS_NODE_SSH
+              value: fake
+            {{- end }}
+            # The add-on values editor runs `helm show values` API-side (no cluster needed).
+            - name: KAAS_ADDON_VALUES
+              value: helm
+            # Authentication. Deliberately HERE and not in kaas.commonEnv: the worker never
+            # authenticates a user, so the directory config and its bind password stay out of the
+            # one container that holds the libvirt socket and every tenant's secrets. Same
+            # discipline as vCenter credentials being worker-only, inverted.
+            - name: KAAS_AUTH
+              value: {{ .Values.auth.mode | quote }}
+            {{- if eq .Values.auth.mode "ldap" }}
+            - name: KAAS_LDAP
+              value: {{ .Values.auth.ldap.seam | quote }}
+            - name: KAAS_LDAP_CONFIG
+              value: /etc/kaas/ldap.yaml
+            - name: KAAS_LDAP_BIND_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kaas.secretName" . }}
+                  key: kaas-ldap-bind-password
+            - name: KAAS_LDAP_MAX_FAILURES
+              value: {{ .Values.auth.ldap.maxFailures | quote }}
+            - name: KAAS_LDAP_MAX_IP_FAILURES
+              value: {{ .Values.auth.ldap.maxIPFailures | quote }}
+            - name: KAAS_LDAP_THROTTLE_WINDOW
+              value: {{ .Values.auth.ldap.throttleWindow | quote }}
+            {{- end }}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            # helm (the values editor) needs somewhere to write its cache under a read-only rootfs.
+            - name: tmp
+              mountPath: /tmp
+            {{- if eq .Values.auth.mode "ldap" }}
+            # The mapping config. A ConfigMap, not a Secret: it holds DNs and filters, never the
+            # bind password (that arrives via secretKeyRef above). The rootfs is read-only, so this
+            # must be a real mount rather than a file written at startup.
+            - name: ldap-config
+              mountPath: /etc/kaas
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if eq .Values.auth.mode "ldap" }}
+        - name: ldap-config
+          configMap:
+            name: {{ include "kaas.fullname" . }}-ldap
+        {{- end }}
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kaas.fullname" . }}-api
+  labels:
+    {{- include "kaas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+  selector:
+    {{- include "kaas.selectorLabels" (dict "ctx" . "component" "api") | nindent 4 }}
+{{- if .Values.api.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "kaas.fullname" . }}-api
+  labels:
+    {{- include "kaas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  minAvailable: {{ .Values.api.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "kaas.selectorLabels" (dict "ctx" . "component" "api") | nindent 6 }}
+{{- end }}
+{{- if .Values.api.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "kaas.fullname" . }}-api
+  labels:
+    {{- include "kaas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "kaas.fullname" . }}-api
+  minReplicas: {{ .Values.api.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.api.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.api.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

@@ -1,0 +1,30 @@
+---
+# Format and mount every worker's extra disks (domain.NodeDisk) with LVM. Invoked by
+# config/ansible.EnsureNodeDisks once the volumes are attached, and re-run on every reconcile tick of
+# a cluster that has disks - so it must be, and is, idempotent (see the node_disks role).
+#
+# Runs against the WORKERS only: extra disks are a worker feature (a control plane's storage is the
+# platform's business - etcd lives there), which domain.ValidateNodeDisks enforces at admission.
+#
+# Only hosts whose inventory carries a non-empty `node_disks` do any work; the role loops an empty
+# list to nothing on every other node, so this is cheap to run across the whole cluster.
+- name: Configure extra node disks
+  hosts: workers
+  become: true
+  gather_facts: false
+  pre_tasks:
+    # The disk may have been hot-attached to a node moments ago, and a node in a freshly-scaled pool
+    # may only just have booted. Same reasoning as join.yml: confirm SSH before touching anything.
+    - name: Wait for SSH
+      ansible.builtin.wait_for_connection:
+        delay: 2
+        timeout: 300
+    # udev publishes /dev/disk/by-id/ entries asynchronously after a hot-attach, so the by-id symlink
+    # the role resolves against can lag the attach by a moment. Settling here turns a race that would
+    # fail the reconcile step (and retry a tick later) into a normal, quiet success.
+    - name: Settle udev so hot-attached disks appear under /dev/disk/by-id
+      ansible.builtin.command: udevadm settle --timeout=30
+      changed_when: false
+      when: node_disks | default([]) | length > 0
+  roles:
+    - node_disks

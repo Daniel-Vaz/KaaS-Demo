@@ -1,0 +1,46 @@
+{{- if .Values.ingress.enabled }}
+{{- $fullname := include "kaas.fullname" . -}}
+{{/*
+The front door - the Kubernetes counterpart of the `lb` container in deploy/compose.scale.yaml.
+
+One host is enough: `/` reaches the portal, and the portal itself reverse-proxies /api to the API
+Service (so the browser stays same-origin, exactly as in compose). The rules below therefore send
+everything to `web`; the API Service is reachable in-cluster for anything that wants it directly.
+
+Two traffic shapes need care from whatever controller terminates this: the live event stream (SSE)
+and the cluster shell (WebSocket). Both are long-lived and must not be buffered - hence the
+annotations in values.yaml. A controller that buffers responses will make the Activity tab appear
+frozen and the Terminal unusable.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "kaas.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName | quote }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}-web
+                port:
+                  number: 80
+{{- end }}

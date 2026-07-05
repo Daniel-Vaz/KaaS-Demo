@@ -1,0 +1,40 @@
+---
+# Automatic control-plane certificate rotation. Invoked by internal/config/ansible.RenewCerts with
+# extra-vars artifacts_dir.
+#
+# Play 1 renews + restarts each control plane one at a time (serial:1 keeps HA etcd quorum and leaves
+# the API reachable via the VIP throughout; a single control plane takes a brief outage, like the
+# etcd restore path). Play 2 reports the new earliest expiry and fetches the freshly-renewed admin
+# kubeconfig back to the controller - the reconciler re-seals it as the cluster's stored kubeconfig,
+# because every worker-side seam reads it.
+#
+# The role's tasks are pulled in with import_role + tasks_from - NOT the play-level `roles:` keyword,
+# which silently ignores tasks_from (ansible-core treats it as a role var and loads tasks/main.yml,
+# which this role doesn't have), so the play would run zero tasks.
+
+- name: Renew each control plane's certificates
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  serial: 1
+  tasks:
+    - name: Renew and restart this control plane
+      ansible.builtin.import_role:
+        name: renew_certs
+        tasks_from: renew.yml
+
+- name: Report the renewed expiry and fetch the fresh admin kubeconfig
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Observe the renewed certificate expiry
+      ansible.builtin.import_role:
+        name: renew_certs
+        tasks_from: expiry.yml
+
+    - name: Fetch the renewed admin kubeconfig back to the controller
+      ansible.builtin.fetch:
+        src: /etc/kubernetes/admin.conf
+        dest: "{{ artifacts_dir }}/admin.conf"
+        flat: true

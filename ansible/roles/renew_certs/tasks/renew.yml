@@ -1,0 +1,101 @@
+---
+# Renew this control plane's kubeadm-managed certificates and restart the static control-plane pods
+# so they load them. Runs per control-plane node (renew-certs.yml uses serial:1 for HA - one member
+# restarts at a time, keeping etcd quorum and the API reachable via the VIP; a single control plane
+# takes a brief outage, like the etcd restore path). Invoked by internal/config/ansible.RenewCerts,
+# which passes cert_renew_cutoff_epoch (now + the renewal window) as an extra-var.
+#
+# Two properties make this safe to retry - which matters because the reconcile job can be killed by
+# its timeout mid-run and River re-runs the step:
+#
+#   1. Per-node window guard. A node whose earliest cert already expires AFTER the cutoff was renewed
+#      by an earlier (partial) attempt, so it is skipped - a retry never re-renews or re-bounces a node
+#      that is already done; it just advances to the ones still due. Without this a retry would bounce
+#      every control plane again.
+#   2. Kill-safe restart. The manifests are moved aside and back to force kubelet to recreate the
+#      pods; a run killed between those two steps would leave the node's control plane down, so the
+#      FIRST task restores any manifests a prior killed run left in the holding dir. The vulnerable
+#      window is tiny (a sub-second move plus the wait-for-stop), and this closes it.
+#
+# The wait-for-live gate runs on EVERY node - even a skipped one - so the play never advances to the
+# next control plane until this one is serving again: the quorum guarantee.
+#
+# Deliberately NOT touched: the CA (10-year; rotating it is disruptive) and kubelet's own certs
+# (kubeadm enables kubelet client-cert auto-rotation, so kubelet self-heals). Production would fork the
+# restart under a privileged supervisor and gate on /readyz across all members, not just the local one.
+
+- name: Restore any static-pod manifests left aside by a killed prior run
+  # A no-op unless a previous (timed-out) run died with the manifests still in the holding dir.
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if compgen -G '/etc/kubernetes/manifests.renew/*.yaml' >/dev/null; then
+      mv -f /etc/kubernetes/manifests.renew/*.yaml /etc/kubernetes/manifests/
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Determine this control plane's earliest certificate expiry (epoch seconds)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    min=
+    for f in $(find /etc/kubernetes/pki -name '*.crt'); do
+      e=$(date -d "$(openssl x509 -enddate -noout -in "$f" | cut -d= -f2)" +%s)
+      if [ -z "$min" ] || [ "$e" -lt "$min" ]; then min=$e; fi
+    done
+    echo "$min"
+  args:
+    executable: /bin/bash
+  register: node_cert_epoch
+  changed_when: false
+
+- name: Renew this control plane's certificates and restart its static pods (only if still due)
+  when: (node_cert_epoch.stdout | int) < (cert_renew_cutoff_epoch | int)
+  block:
+    - name: Renew all kubeadm-managed control-plane certificates
+      ansible.builtin.command: kubeadm certs renew all
+      changed_when: true
+
+    - name: Ensure the manifest holding directory exists
+      ansible.builtin.file:
+        path: /etc/kubernetes/manifests.renew
+        state: directory
+        mode: '0755'
+
+    - name: Move the static-pod manifests aside (kubelet stops apiserver/controller-manager/scheduler/etcd)
+      ansible.builtin.shell: mv -f /etc/kubernetes/manifests/*.yaml /etc/kubernetes/manifests.renew/
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Wait for the local API server to stop listening (pods actually torn down)
+      ansible.builtin.shell: "! ss -H -tln sport = :6443 | grep -q ."
+      args:
+        executable: /bin/bash
+      register: apiserver_stopped
+      until: apiserver_stopped.rc == 0
+      retries: 30
+      delay: 2
+      changed_when: false
+
+    - name: Move the manifests back (kubelet recreates the pods with the renewed certs)
+      ansible.builtin.shell: mv -f /etc/kubernetes/manifests.renew/*.yaml /etc/kubernetes/manifests/
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+- name: Wait for the local API server to be live again (quorum gate before the next control plane)
+  # /livez is served to anonymous callers, so no kubeconfig is needed; the cert is for the API name,
+  # not localhost, so validation is off. Generous budget: on a stacked-etcd HA node the restart bounces
+  # etcd too, and the apiserver's etcd-dependent liveness checks can take a few minutes to settle. If
+  # this node still isn't live when the budget runs out the step fails and retries - the window guard
+  # above means the retry won't re-bounce it, only wait for it - so quorum is never risked.
+  ansible.builtin.uri:
+    url: https://localhost:6443/livez
+    validate_certs: false
+    status_code: 200
+  register: apiserver_livez
+  until: apiserver_livez.status == 200
+  retries: 72
+  delay: 5
+  changed_when: false

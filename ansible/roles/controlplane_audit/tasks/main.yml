@@ -1,0 +1,113 @@
+---
+# Enable Kubernetes API-server audit logging on this control-plane node. Runs BEFORE kubeadm
+# init/join; the controlplane and controlplane_join roles pass `--patches /etc/kubernetes/patches`
+# so kubeadm bakes the audit config into the kube-apiserver static pod it generates. Baked in
+# unconditionally, so every newly bootstrapped cluster is audited by default.
+#
+# Backend: the apiserver writes audit events as JSON to its OWN stdout (--audit-log-path=-), which
+# the portal's Audit tab reads back with `kubectl logs kube-apiserver-<node>` via the worker exec
+# agent (see internal/audit). Reusing the kubectl transport means no new in-cluster component and no
+# new API<->worker hop. Production would ship audit to a real sink (Loki/ELK/webhook) rather than the
+# apiserver's own container log - noted as the deliberate shortcut.
+#
+# Shared by the first control plane (bootstrap.yml, before the `controlplane` role) and each joining
+# control plane (before `controlplane_join`), so an HA cluster audits on every apiserver identically.
+
+- name: Ensure the kubeadm patches dir exists
+  ansible.builtin.file:
+    path: /etc/kubernetes/patches
+    state: directory
+    mode: '0700'
+
+- name: Write the API-server audit policy
+  # Curated to keep the feed meaningful (who CHANGED what) and stdout volume bounded: drop the
+  # high-volume noise and pure reads, keep every mutation at Metadata, elevate RBAC writes to
+  # RequestResponse. This file is mounted read-only into the apiserver pod by the patch below.
+  ansible.builtin.copy:
+    dest: /etc/kubernetes/audit-policy.yaml
+    mode: '0600'
+    content: |
+      apiVersion: audit.k8s.io/v1
+      kind: Policy
+      # One line per completed request is plenty - skip the RequestReceived stage.
+      omitStages:
+        - RequestReceived
+      rules:
+        # --- Drop the high-volume, low-signal traffic ---------------------------------------
+        # Leader-election lease chatter.
+        - level: None
+          resources:
+            - group: coordination.k8s.io
+              resources: ["leases"]
+        # Events are themselves a log; endpoints/endpointslices churn constantly.
+        - level: None
+          resources:
+            - group: ""
+              resources: ["events", "endpoints"]
+            - group: discovery.k8s.io
+              resources: ["endpointslices"]
+        # Core controllers and nodes generate heavy read traffic.
+        - level: None
+          users: ["system:kube-proxy"]
+          verbs: ["watch"]
+        - level: None
+          userGroups: ["system:nodes"]
+          verbs: ["get", "list", "watch"]
+        - level: None
+          users:
+            - system:kube-controller-manager
+            - system:kube-scheduler
+          verbs: ["get", "list", "watch"]
+        # Health/version/metrics/openapi probes.
+        - level: None
+          nonResourceURLs:
+            - /healthz*
+            - /livez*
+            - /readyz*
+            - /version
+            - /metrics
+            - /openapi/*
+        # Read-only access is high-volume and low-signal for an audit trail - drop pure reads,
+        # keep every mutation. This is what makes the feed "who changed what".
+        - level: None
+          verbs: ["get", "list", "watch"]
+        # --- Keep the interesting requests --------------------------------------------------
+        # RBAC changes are the escalation-relevant writes - capture request + response.
+        - level: RequestResponse
+          resources:
+            - group: rbac.authorization.k8s.io
+              resources: ["roles", "clusterroles", "rolebindings", "clusterrolebindings"]
+        # Everything else (create/update/patch/delete, auth decisions) at Metadata.
+        - level: Metadata
+
+- name: Write the kubeadm kube-apiserver audit patch (JSON6902)
+  # The file name selects the component (kube-apiserver) and patch type (json = RFC6902). kubeadm
+  # applies it to the static pod manifest it generates, so this appends the audit flags and mounts
+  # the policy file WITHOUT us having to know the rest of the generated command. Version-agnostic:
+  # unlike ClusterConfiguration.apiServer.extraArgs it needs no kubeadm apiVersion branching.
+  ansible.builtin.copy:
+    dest: /etc/kubernetes/patches/kube-apiserver+json.yaml
+    mode: '0600'
+    content: |
+      - op: add
+        path: /spec/containers/0/command/-
+        value: --audit-policy-file=/etc/kubernetes/audit-policy.yaml
+      - op: add
+        path: /spec/containers/0/command/-
+        value: --audit-log-path=-
+      - op: add
+        path: /spec/containers/0/command/-
+        value: --audit-log-format=json
+      - op: add
+        path: /spec/volumes/-
+        value:
+          name: audit-policy
+          hostPath:
+            path: /etc/kubernetes/audit-policy.yaml
+            type: File
+      - op: add
+        path: /spec/containers/0/volumeMounts/-
+        value:
+          name: audit-policy
+          mountPath: /etc/kubernetes/audit-policy.yaml
+          readOnly: true

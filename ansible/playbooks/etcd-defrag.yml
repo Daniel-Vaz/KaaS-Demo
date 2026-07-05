@@ -1,0 +1,65 @@
+---
+# Defragment the cluster's etcd. Invoked by internal/config/ansible.DefragEtcd with extra-vars
+# artifacts_dir and etcd_defrag_min_ratio.
+#
+# Three plays, and the order is the safety argument:
+#
+#   1. PRE-FLIGHT on one control plane: every member must be healthy. Defragmentation blocks the
+#      member it runs on, so starting while another member is ALREADY down is how a three-member
+#      cluster loses quorum mid-maintenance. This play FAILS the run rather than proceeding - the
+#      reconcile step retries, and a cluster that is degraded for another reason gets left alone
+#      until it isn't. Every other guard in this feature decides whether the work is worth doing;
+#      this one decides whether it is safe.
+#   2. DEFRAG, serial:1 over control_plane. One member at a time, leadership moved off it first,
+#      alarms disarmed after, and a health gate before the play may advance. See the role's
+#      defrag.yml.
+#   3. REPORT on one control plane: re-read the backend store so the caller can stamp the reclaimed
+#      size without a second observation pass.
+#
+# The role's tasks are pulled in with import_role + tasks_from - NOT the play-level `roles:` keyword,
+# which silently ignores tasks_from (ansible-core treats it as a role var and loads tasks/main.yml,
+# which this role doesn't have), so the plays would run zero tasks.
+
+- name: Refuse to defragment unless every etcd member is healthy
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Resolve this node's etcd pod
+      ansible.builtin.import_role:
+        name: etcd_maintenance
+        tasks_from: pod.yml
+
+    - name: Check every etcd member's health
+      # `endpoint health --cluster` exits non-zero if ANY member is unhealthy. Retried, because a
+      # member that was just restarted for an unrelated reason (a kubelet bounce, an upgrade
+      # settling) is a transient state worth waiting out rather than a reason to abandon the run.
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig }} -n kube-system exec {{ etcd_pod }} --
+        etcdctl {{ etcd_certs }} endpoint health --cluster
+      register: etcd_cluster_health
+      until: etcd_cluster_health.rc == 0
+      retries: 12
+      delay: 10
+      changed_when: false
+
+- name: Defragment each etcd member, one at a time
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  serial: 1
+  tasks:
+    - name: Defragment this member
+      ansible.builtin.import_role:
+        name: etcd_maintenance
+        tasks_from: defrag.yml
+
+- name: Report the reclaimed backend store
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Observe every etcd member
+      ansible.builtin.import_role:
+        name: etcd_maintenance
+        tasks_from: status.yml

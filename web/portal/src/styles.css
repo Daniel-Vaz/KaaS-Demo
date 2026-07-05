@@ -1,0 +1,25 @@
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+/* Tidy scrollbars inside the live activity log and other scroll areas. */
+* {
+  scrollbar-width: thin;
+}
+
+/* Clickable row (recent clusters, brand) - resets link styling and adds a hover surface. */
+.recent-row {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  border-radius: 8px;
+}
+.recent-row:hover {
+  background: var(--mantine-color-default-hover);
+}

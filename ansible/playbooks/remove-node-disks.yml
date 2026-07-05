@@ -1,0 +1,60 @@
+---
+# Tear down extra disks IN THE GUEST, before their volumes are detached and destroyed.
+#
+# ORDER IS THE POINT. The reconciler runs this first and only then lets the provisioner detach the
+# volume (see reconcileNodeDisks): unmounting after the device has vanished leaves the node with a
+# stale mount over a dead device - I/O errors for anything still writing there, and a dangling fstab
+# entry that would strand the node at its next boot if it were not for `nofail`. Doing it in this
+# order means that by the time the block device disappears, nothing in the guest refers to it.
+#
+# Invoked by config/ansible.RemoveNodeDisks with extra-var `remove_disks`: a list of
+# {vm_name, name, mount_path}. Idempotent throughout - every step tolerates the object already being
+# gone, because this re-runs on each tick until the whole removal converges, and because a user may
+# well have unmounted things themselves.
+- name: Remove extra node disks
+  hosts: workers
+  become: true
+  gather_facts: false
+  vars:
+    # Only this host's disks. remove_disks names disks across the whole cluster; each node handles
+    # its own.
+    my_disks: "{{ remove_disks | default([]) | selectattr('vm_name', 'equalto', inventory_hostname) | list }}"
+  tasks:
+    - name: Unmount each removed disk
+      # lazy (-l) as the fallback, not the default: a clean unmount is what we want, but a process
+      # still holding the mount must not wedge the removal forever. -l detaches the filesystem now
+      # and cleans up when the last reference goes, which lets the teardown proceed.
+      ansible.builtin.shell: |
+        set -o pipefail
+        if mountpoint -q '{{ item.mount_path }}'; then
+          umount '{{ item.mount_path }}' || umount -l '{{ item.mount_path }}'
+        fi
+      args:
+        executable: /bin/bash
+      loop: "{{ my_disks }}"
+      loop_control:
+        label: "{{ item.mount_path }}"
+      changed_when: true
+
+    - name: Drop each removed disk from /etc/fstab
+      # Before the VG goes: an fstab line naming a device that no longer exists is exactly what
+      # `nofail` exists to survive, but leaving one behind would still be litter.
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        regexp: "^/dev/{{ 'kaas-' ~ item.name }}/data[[:space:]]"
+        state: absent
+      loop: "{{ my_disks }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Remove each disk's volume group
+      # vgremove -f takes the LVs with it. The VG is named for this disk alone (one VG per disk - see
+      # the node_disks role), so this can only ever destroy the disk being removed. Tolerates a
+      # missing VG: the disk may never have been formatted, or a previous run may have got this far.
+      ansible.builtin.command: "vgremove -f {{ 'kaas-' ~ item.name }}"
+      loop: "{{ my_disks }}"
+      loop_control:
+        label: "{{ 'kaas-' ~ item.name }}"
+      register: vg_removed
+      failed_when: vg_removed.rc != 0 and 'not found' not in (vg_removed.stderr | default('') | lower)
+      changed_when: vg_removed.rc == 0

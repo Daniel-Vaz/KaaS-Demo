@@ -1,0 +1,52 @@
+#jinja2: trim_blocks: True, lstrip_blocks: True
+# Managed by KaaS-Demo (ansible loadbalancer role). Floats {{ control_plane_vip }} across the
+# control-plane nodes. The node with the highest priority (the first control plane) holds the
+# VIP; if its haproxy dies the chk_haproxy weight drop hands the VIP to another node.
+vrrp_script chk_haproxy {
+    script "/usr/bin/killall -0 haproxy"
+    interval 2
+    weight 2
+    fall 2
+    rise 2
+}
+
+vrrp_instance kube_api {
+    state BACKUP
+    interface {{ ansible_default_ipv4.interface }}
+    virtual_router_id {{ vrrp_router_id }}
+    priority {{ 110 - (groups['control_plane'].index(inventory_hostname)) }}
+    advert_int 1
+    # Unicast VRRP. On KVM every cluster owns a private bridge where multicast (keepalived's
+    # default) is fine, but on vSphere all clusters share one standard-vSwitch portgroup, where
+    # VRRP multicast between VMs is unreliable (IGMP snooping / vSwitch security policy). If the
+    # adverts don't reach all peers the nodes split-brain - each brings up the VIP, three hosts
+    # answer ARP for it, and every connection to VIP:8443 resets (kubeadm sees "EOF"). We know all
+    # the control-plane IPs here, so address the peers directly and remove the multicast dependency.
+    unicast_src_ip {{ ansible_host | default(ansible_default_ipv4.address) }}
+    unicast_peer {
+        {% for host in groups['control_plane'] if host != inventory_hostname %}
+        {{ hostvars[host].ansible_host | default(hostvars[host].ansible_default_ipv4.address) }}
+        {% endfor %}
+    }
+    # Without this, a HIGHER-priority node that (re)joins always preempts the VIP from a healthy,
+    # already-serving lower-priority master - standard VRRP behavior. That's actively harmful here:
+    # the first control plane always has the highest priority, so every time it's rebuilt during a
+    # rolling OS upgrade, its keepalived would instantly snatch the VIP back the moment it restarts -
+    # before that node has a working apiserver, and likely before its own freshly-started haproxy has
+    # completed even one health-check round (a brand-new haproxy needs a couple of check intervals
+    # before it'll route to ANY backend, refusing connections until then). `kubeadm join
+    # --control-plane`'s check-etcd phase dials the VIP once with no retry, so it lands in that window
+    # and fails outright. nopreempt makes a recovering node take over ONLY if the current holder
+    # actually stops advertising (a real failure), not merely because it technically outranks it.
+    nopreempt
+    authentication {
+        auth_type PASS
+        auth_pass {{ vrrp_password }}
+    }
+    virtual_ipaddress {
+        {{ control_plane_vip }}
+    }
+    track_script {
+        chk_haproxy
+    }
+}

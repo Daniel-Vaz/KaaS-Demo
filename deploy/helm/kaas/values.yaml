@@ -1,0 +1,485 @@
+# KaaS-Demo on Kubernetes. See deploy/helm/kaas/README.md for the topology and a worked example.
+#
+# The one decision that shapes everything else is `kvm.mode` (bottom of this file): where the
+# hypervisor lives. `remote` (the default here) is the only mode that lets the platform run as
+# ordinary, freely-scheduled, freely-scaled pods - the worker reaches libvirt over SSH and every
+# kubectl/helm call is routed through an SSH SOCKS tunnel. `local` assumes the cluster VMs live on
+# the very node the pod runs on, which forces host networking and pins pods to that node.
+
+nameOverride: ""
+fullnameOverride: ""
+
+# real - the platform provisions actual VMs: OpenTofu/libvirt, Ansible/kubeadm, Helm add-ons. Needs
+#   a hypervisor (see kvm.* below) and the SSH keys under config.clusterSSH.
+# fake - every backend is the in-process fake: clusters go Pending → Ready with no VM anywhere. The
+#   control plane itself is exactly the same code (reconcile loop, state machine, durable queue,
+#   advisory-locked admission, leader election), so this is the honest way to try the chart, demo the
+#   portal, or test the deployment on any cluster with no hypervisor at all. It is the Kubernetes
+#   counterpart of `make up-fake`. The shell sandbox and the SSH tunnel are not deployed in this mode
+#   - with no real clusters there is nothing for them to reach, and the API serves the simulated
+#   Terminal/Workloads/Monitoring/Security seams in-process.
+providers: real
+
+image:
+  # Where the four images (api, web, worker, shell) were pushed. Locally:
+  #   make images-push REGISTRY=localhost:5000/kaas
+  registry: ghcr.io/dvaz/kaas-demo
+  tag: latest
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# --- Infrastructure providers (see docs/architecture.md#infrastructure-providers) ----------------
+# `kvm` (below) is always available and needs no entry here. Add `vsphere` and/or `proxmox` to
+# `providers` to offer them too - the portal's wizard shows an Infrastructure step only when more
+# than one is enabled. Both are "shared-network" providers (clone a golden template onto one
+# operator-owned network, dhcp or platform-allocated static addressing) and are reached DIRECTLY
+# from the worker pod - no tunnel, unlike a remote KVM host. Their OpenTofu modules are baked into
+# the worker image at /infra/vsphere and /infra/proxmox (see deploy/Containerfile.worker), so
+# nothing here needs a module-dir override or a volume mount.
+infra:
+  providers: [kvm]
+
+  # vCenter placement + credentials. Ignored unless "vsphere" is in providers above.
+  vsphere:
+    url: ""
+    username: ""
+    password: ""
+    insecure: false
+    datacenter: ""
+    cluster: ""     # compute cluster
+    datastore: ""    # etcd's WAL lives here - size/perf accordingly
+    folder: ""       # optional VM folder
+
+    # ip_mode dhcp: the site's DHCP server assigns node IPs (read back via open-vm-tools). static:
+    # the platform allocates node IPs + the HA VIP from `range` and injects them via cloud-init.
+    # Either way `network.name` (the portgroup) is required.
+    network:
+      name: ""
+      mode: dhcp                # dhcp | static
+      cidr: ""                  # the portgroup's subnet, e.g. 172.23.252.0/24
+      gateway: ""
+      dns: ""                   # comma-separated
+      range: ""                 # "<first>-<last>", inclusive; static mode only
+
+    # This deployment's OWN capacity ceiling and conserved pool - separate from kvm's KAAS_BUDGET_*
+    # below, because capacity is not fungible between backends (see docs/architecture.md).
+    budget:
+      vcpu: 64
+      memMB: 131072
+      diskGB: 4096
+
+  # Proxmox VE placement + credentials. Ignored unless "proxmox" is in providers above. Auth is
+  # EITHER apiToken OR username+password - set exactly one; the provisioner rejects both or neither.
+  proxmox:
+    endpoint: ""      # e.g. https://proxmox.example.internal:8006/
+    insecure: false
+    apiToken: ""      # "user@realm!tokenid=uuid" - takes precedence over username/password below
+    username: ""      # "user@realm"
+    password: ""
+    node: ""          # the node VMs are created on
+    datastore: ""     # for VM disks + the cloud-init drive
+
+    network:
+      bridge: ""
+      vlan: 0                   # VLAN tag on a VLAN-aware bridge; 0 = untagged
+      mode: dhcp                # dhcp | static
+      cidr: ""
+      gateway: ""
+      dns: ""                   # comma-separated
+      range: ""                 # "<first>-<last>", inclusive; static mode only
+
+    budget:
+      vcpu: 64
+      memMB: 131072
+      diskGB: 4096
+
+  # NetBox IPAM (optional; shared-network providers only - vSphere or Proxmox). Records each
+  # cluster's node IPs + HA VIP as they are learned and releases them on delete. Empty url = the
+  # integration is not wired at all. Auth is a token OR username/password, same shape as Proxmox.
+  netbox:
+    url: ""
+    token: ""
+    username: ""
+    password: ""
+    insecure: false
+    tag: kaas
+
+# --- Site DNS (optional) ------------------------------------------------------------------------
+# Every cluster owns a subdomain of baseDomain ("<cluster>.kaas.example.internal") and the platform
+# publishes ONE record for it: "*.<appsLabel>.<cluster>.<baseDomain>" A <the cluster's Envoy Gateway
+# address>. So a user's app is reachable at <anything>.apps.<cluster>.<baseDomain> as soon as the
+# cluster is Ready, with nothing to configure. The in-cluster external-dns add-on is wired to the
+# same server and confined to that cluster's own subdomain, for the extra names a user's
+# Services/Ingresses/HTTPRoutes ask for.
+#
+# baseDomain should be a zone DELEGATED to the platform, not the AD domain itself: the credential
+# below can write everything in it. Empty baseDomain = no cluster DNS at all.
+dns:
+  baseDomain: ""            # e.g. kaas.example.internal
+  appsLabel: apps           # "*.apps.<cluster>.<baseDomain>"
+  server: ""                # the domain controller's FQDN (GSS-TSIG authenticates to DNS/<fqdn>)
+  zone: ""                  # the delegated zone holding the records; empty = baseDomain
+  ttl: 300
+  # gss = AD "secure only" dynamic updates (the default), tsig = a shared key, none = a zone that
+  # accepts nonsecure updates.
+  auth: gss
+  kerberos:
+    username: ""            # the service account permitted to write the zone (user or user@REALM)
+    password: ""
+    realm: ""               # the AD realm, e.g. example.INTERNAL (empty = taken from user@REALM)
+  tsig:
+    keyName: ""
+    secret: ""              # base64
+    algorithm: hmac-sha256
+
+# --- HashiCorp Vault (internal/vault) -----------------------------------------------------------
+# The platform's secret store, deployed as a chart DEPENDENCY (hashicorp/vault) and assumed always
+# present. The reconciler (worker) creates the `kaas` KV mount, per-cluster paths/policies and the
+# identity that mirrors the portal's access; the API holds only the minter token for the "View in
+# Vault" handoff. seam=fake uses the in-memory seam and needs no Vault at all.
+vault:
+  # Deploy the bundled hashicorp/vault dependency (dev mode). Set false to point at an external Vault.
+  enabled: true
+  seam: real                # real | fake (the internal/vault seam selector, KAAS_VAULT)
+  # Address the platform reaches Vault at. Default targets the bundled dependency's service. For an
+  # external Vault set this and vault.enabled=false.
+  addr: "http://{{ .Release.Name }}-vault:8200"
+  mount: kaas
+  # The management/root token. Dev mode uses a fixed root token; production would use a scoped token
+  # from a KMS/External Secrets, not a chart value (the same shortcut as config.secretKey).
+  rootToken: kaas-root-dev
+  insecure: false
+  # Browser-facing Vault UI base for the "View in Vault" deep-link (an Ingress/route to the UI).
+  uiUrl: ""
+  # Passed through to the hashicorp/vault subchart: a single-server DEV instance (auto-unsealed,
+  # in-memory). Production would run server.ha with auto-unseal + persistent storage + an audit device.
+  server:
+    dev:
+      enabled: true
+      devRootToken: kaas-root-dev
+  ui:
+    enabled: true
+
+# --- Platform configuration (see docs/running.md) -----------------------------------------------
+config:
+  # Master key for at-rest secret encryption (AES-256-GCM) AND the session-cookie signer. It must be
+  # the SAME for api and worker, and STABLE across upgrades - change it and every stored kubeconfig
+  # becomes undecryptable. Empty = the chart generates one on first install and preserves it on
+  # upgrade (a lookup of the existing Secret), which is convenient but leaves the key in the
+  # release; production would source it from a KMS/External Secrets, not from here.
+  secretKey: ""
+
+  # Shared bearer token the API presents to the exec agent. Same story as secretKey: empty =
+  # generated and preserved.
+  shellToken: ""
+
+  # Shared bearer token the API presents to the node-ssh sandbox. SEPARATE from shellToken because
+  # that sandbox holds the VM key - a leaked shell token must not open it. Empty = generated and
+  # preserved, same as the others.
+  nodeSshToken: ""
+
+  # Seeded admin account (internal/app.ensureAdmin). Every replica seeds it at boot; the seed is
+  # advisory-locked, so they race harmlessly.
+  #
+  # Under auth.mode=ldap this is also the BREAK-GLASS account: the one login that still works when
+  # the domain controllers don't, and the account `make kubeconfig` and teardown-clusters.sh use.
+  # The directory can never claim this username, so pick one no real person has.
+  adminUsername: admin
+  adminPassword: admin
+
+  # The platform-wide capacity budget the reconciler admits clusters against. The admin's own quota
+  # is whatever is left unallocated (a conserved pool - see docs/architecture.md).
+  budgetVCPU: 16
+  budgetMemMB: 24576
+
+  # How long a single reconcile phase may run before River kills and retries it. Sized for the
+  # slowest step: a `helm --wait` add-on install, or uploading a multi-GB golden image to a remote
+  # hypervisor over SSH. Raise it if your link to the KVM host is slow.
+  reconcileJobTimeout: 15m
+
+  # SSH keypair the platform uses to reach the CLUSTER VMs it provisions (not the hypervisor - that
+  # is kvm.ssh below). The public key is baked into each VM by cloud-init; the private key is how
+  # Ansible gets back in. Both are REQUIRED in real mode.
+  clusterSSH:
+    publicKey: ""
+    privateKey: ""
+
+# Set to reuse an existing Secret instead of letting the chart create one from the values above.
+# It must carry the keys: kaas-secret-key, kaas-shell-token, kaas-node-ssh-token, kaas-admin-password,
+# database-url, cluster-ssh-private-key, kvm-ssh-private-key (see templates/secret.yaml).
+existingSecret: ""
+
+# --- Components ---------------------------------------------------------------------------------
+# Every one of these is stateless and safe to replicate - the coordination lives in Postgres
+# (advisory-locked admission, a unique-per-cluster durable queue, leader-elected sweeps). See
+# docs/architecture.md#horizontal-scaling.
+
+# The portal: nginx serving the SPA and reverse-proxying /api to the API Service.
+web:
+  replicaCount: 2
+  resources:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {memory: 128Mi}
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 75
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# --- Authentication (internal/authn) ------------------------------------------------------------
+#
+# Every setting below reaches the API POD ONLY, never the worker: the worker does not authenticate
+# users, so the directory's bind password stays out of the one container holding the libvirt socket
+# and every tenant's secrets. (The same discipline as vCenter credentials being worker-only, in
+# reverse.) This is why these are not in `kaas.commonEnv`.
+auth:
+  # local  local accounts with passwords, open self-registration (the default)
+  # ldap   Active Directory / LDAP: accounts are created on first login, and their groups + roles
+  #        come from the mapping rules below. Self-registration is disabled; config.adminUsername
+  #        keeps working as break-glass.
+  mode: local
+
+  ldap:
+    # ORTHOGONAL to auth.mode, exactly as providers (fake|real) is to the rest of the platform:
+    # mode says whether to use a directory, this says whether the directory is real.
+    #   real  talk to the domain controllers in `config` below
+    #   fake  an in-memory directory synthesized FROM those same rules - one user per rule
+    #         (ad-<group_key>-<role>, plus ad-everyone and ad-nobody; password "demo")
+    # `mode: ldap` + `seam: fake` runs the whole AD flow with no DC, and validates your real mapping
+    # rules on the way. Prove the config there before pointing it at production.
+    seam: real
+
+    # The service account's password. The ONLY secret here - it goes into the chart's Secret and is
+    # mounted via secretKeyRef, which is also why `config` below can be a plain ConfigMap.
+    # Production would source this from a KMS / External Secrets rather than a Helm value.
+    bindPassword: ""
+
+    # The ldap.yaml document, verbatim. Required when mode is ldap; the chart fails the render
+    # otherwise rather than starting an API that cannot authenticate anyone.
+    #
+    # See deploy/ldap.example.yaml for the annotated version - the DCs, the service account, where
+    # users live, and the mapping rules. Supply it from a file rather than inline:
+    #
+    #   helm install kaas ./deploy/helm/kaas \
+    #     --set auth.mode=ldap \
+    #     --set-file auth.ldap.config=deploy/ldap.yaml \
+    #     --set auth.ldap.bindPassword=...
+    config: ""
+
+    # Login throttle. /auth/login is public, and with a directory every failed login is a real
+    # bad-password bind against a real AD account.
+    #
+    # maxFailures is PER USERNAME - keep it under your domain's own lockout threshold (typically
+    # 3–5), so the platform is never what locks an account out.
+    #
+    # maxIPFailures is PER SOURCE ADDRESS and must be far higher: an office shares one NAT egress
+    # address, so at the per-user limit a few unrelated typos by colleagues would lock the whole
+    # building out. It exists to catch one host spraying many usernames, which looks nothing like
+    # normal traffic.
+    maxFailures: 3
+    maxIPFailures: 30
+    throttleWindow: 5m
+
+# The control-plane API: JSON + SSE only. It NEVER touches KVM (its provisioner/config/add-on seams
+# are hardcoded fake); real cluster access is proxied to the shell exec agent.
+api:
+  replicaCount: 2
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 512Mi}
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 75
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# The reconciler. The only component that provisions infrastructure (OpenTofu/libvirt, Ansible,
+# Helm). Replicas are safe: River hands each cluster's job to exactly one worker platform-wide, and
+# the GC/metrics/health sweeps run only in the leader-elected replica.
+worker:
+  replicaCount: 2
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 2Gi}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  # Per-cluster OpenTofu workspaces (the state for each cluster's VMs). SHARED by every worker
+  # replica, so with more than one replica this MUST be ReadWriteMany - a workspace written by one
+  # replica has to be readable by whichever replica picks up that cluster's next phase.
+  #
+  # It is a cache, not the source of truth (Postgres is): a lost workspace is re-created and
+  # re-converged. But losing it mid-cluster means re-importing state, so give it a real volume.
+  workspace:
+    enabled: true
+    accessMode: ReadWriteMany
+    storageClass: ""
+    size: 5Gi
+    # Point at an existing claim instead of creating one.
+    existingClaim: ""
+
+  # The golden images the provisioner clones per (OS, Kubernetes) pair, plus the fallback base
+  # image. Read-only to the worker; populate it out of band (`make golden-images` writes them on the
+  # hypervisor host - with a remote KVM host the worker uploads them into the hypervisor's pool).
+  images:
+    enabled: true
+    accessMode: ReadWriteMany
+    storageClass: ""
+    size: 40Gi
+    existingClaim: ""
+    # Path INSIDE the mount for the fallback base image.
+    baseImage: /srv/images/base.qcow2
+
+# The cluster-shell exec agent: the sandbox a user's Terminal (and the Workloads/Monitoring/Security
+# kubectl calls) actually runs in. Deliberately minimal and unprivileged - bash + kubectl, non-root,
+# no capabilities, read-only rootfs, and NO platform secrets: each request carries its own
+# kubeconfig. That statelessness is also why it scales: any replica can serve any request, and the
+# API load-balances over the Service.
+shell:
+  replicaCount: 2
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 512Mi}
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 75
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  # Per-session scratch (kubeconfig, HOME, kubectl cache). An emptyDir - nothing here outlives the
+  # session, by design.
+  workDirSizeLimit: 128Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# The node-ssh sandbox - the isolated environment a user's per-node SSH session runs in. Deployed
+# only in real mode. It is the INVERSE of the shell sandbox: it necessarily holds the cluster-VM SSH
+# key (you cannot ssh to a node without it), and is made safe by carrying no shell/kubectl at all -
+# the only program it starts is ssh. Same scaling story (no cross-session state) and, in local KVM
+# mode, the same host-network + one-pod-per-node constraint as shell. See internal/nodessh.
+nodessh:
+  replicaCount: 2
+  resources:
+    requests: {cpu: 25m, memory: 32Mi}
+    limits: {memory: 256Mi}
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 75
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  # Per-session scratch: sshpty writes a private, empty HOME here. Nothing outlives the session.
+  workDirSizeLimit: 64Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# --- Postgres -----------------------------------------------------------------------------------
+# Desired/observed state AND the durable job queue (River). The single source of truth, and the one
+# component the chart does NOT scale: real HA Postgres (replication, failover, connection routing)
+# is out of scope for the demo - see docs/architecture.md. The bundled StatefulSet is a
+# single-replica, demo-grade database; point `external` at a managed instance for anything real.
+postgres:
+  enabled: true
+  image: docker.io/library/postgres:16
+  auth:
+    username: kaas
+    password: kaas
+    database: kaas
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 8Gi
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 1Gi}
+
+  # Used when postgres.enabled=false: the DSN of a database you run yourself. Prefer supplying it
+  # through existingSecret (key: database-url) rather than in plain values.
+  external:
+    dsn: ""
+
+# --- Ingress ------------------------------------------------------------------------------------
+# The front door. `/` serves the portal; the portal itself proxies /api to the API Service, so one
+# host is enough. apiPath additionally exposes the raw JSON+SSE API (curl, scripts) if you want it.
+#
+# SSE and the shell WebSocket need buffering off and long timeouts - the nginx-ingress annotations
+# below do that. On another controller, set the equivalent.
+ingress:
+  enabled: false
+  className: nginx
+  host: kaas.local
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  tls:
+    enabled: false
+    secretName: ""
+
+service:
+  type: ClusterIP
+
+# --- Where KVM lives ----------------------------------------------------------------------------
+kvm:
+  # remote - the hypervisor is another machine, reached over SSH (KAAS_KVM_HOST). This is the mode
+  #   Kubernetes wants: no host networking, no host paths, no node pinning, so worker/shell pods are
+  #   ordinary scalable pods. OpenTofu dials libvirtd over qemu+ssh, Ansible hops through the host
+  #   with a ProxyCommand, and kubectl/helm reach cluster API servers through an SSH SOCKS tunnel.
+  #
+  # local  - the cluster VMs run on the very node the pod lands on. Requires hostNetwork + the
+  #   libvirt socket as a hostPath + pinning to that node, which is exactly what Kubernetes is bad
+  #   at. Supported for a single-node/dev cluster; use `remote` for anything else.
+  mode: remote
+
+  # --- remote mode ---
+  host: ""          # REQUIRED when mode=remote: hostname/IP of the KVM host
+  sshUser: root
+  sshPort: 22
+  ssh:
+    # The PLATFORM's key to the hypervisor (not the cluster-VM key - that is config.clusterSSH).
+    privateKey: ""
+    # Optional known_hosts. Empty disables host-key checking - a deliberate demo shortcut, and a
+    # fine way to hand someone your hypervisor. Set it for anything real.
+    knownHosts: ""
+
+  # The SSH SOCKS tunnel that carries every kubectl/helm call to the cluster API servers.
+  #
+  # The worker opens its OWN tunnel inside its pod (each pod has its own network namespace, so
+  # 127.0.0.1 is private to it - replicas do not fight over the port). The shell sandbox must not
+  # hold the hypervisor key, so it cannot open one; instead it routes through a small dedicated
+  # tunnel Deployment fronted by a Service. The key lives only in that tunnel pod, never in the
+  # sandbox - the sandbox stays credential-free, which is the whole point of it.
+  socks:
+    port: 1080
+    tunnel:
+      replicaCount: 2
+      resources:
+        requests: {cpu: 10m, memory: 32Mi}
+        limits: {memory: 128Mi}
+
+  # --- local mode ---
+  local:
+    # The libvirt socket directory on the node.
+    libvirtSocketPath: /run/libvirt
+    # Which node(s) actually run libvirt. Pods are pinned here and take the host network.
+    nodeSelector: {}
+    tolerations: []

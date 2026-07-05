@@ -1,0 +1,38 @@
+# Build the cluster shell/kubectl exec agent as its own MINIMAL, UNPRIVILEGED sandbox image - the
+# isolated environment users' Terminal sessions (and the Workloads/Monitoring/Security kubectl calls)
+# run in. Unlike the worker image this carries ONLY bash + kubectl: no OpenTofu/Ansible/Helm, no
+# libvirt client, nothing that touches infrastructure. Combined with the `shell` service's hardening
+# in compose.real.yaml (cap_drop ALL, no-new-privileges, read-only rootfs, non-root user, tmpfs
+# /work, no secrets/keys/sockets mounted), a user who breaks kubectl into arbitrary bash finds
+# nothing sensitive to steal and no privilege to abuse. See internal/shell and cmd/shell-agent.
+FROM docker.io/library/golang:1.26 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/shell-agent ./cmd/shell-agent
+
+FROM docker.io/library/ubuntu:24.04
+
+ARG KUBECTL_VERSION=1.36.2
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# bash + kubectl are the whole toolchain of this sandbox. bash-completion powers the shell's
+# kubectl/`k` tab-completion; ca-certificates lets kubectl trust the cluster API over TLS. That's it
+# - deliberately no infra tooling.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl bash bash-completion \
+ && curl -fsSL "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl" -o /usr/local/bin/kubectl \
+ && chmod +x /usr/local/bin/kubectl && kubectl version --client \
+ && apt-get purge -y curl && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /out/shell-agent /usr/local/bin/shell-agent
+
+# Run as a non-root, unprivileged user. `nobody` (65534) owns nothing in the image; the session
+# working area is a writable tmpfs mounted at /work by compose. Belt-and-braces with the compose
+# `user:` override - the image default is unprivileged even if run without it.
+USER 65534:65534
+
+ENTRYPOINT ["shell-agent"]

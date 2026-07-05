@@ -1,0 +1,140 @@
+{{- if and (eq (include "kaas.real" .) "true") (eq .Values.kvm.mode "remote") }}
+{{- $fullname := include "kaas.fullname" . -}}
+{{/*
+The SSH SOCKS tunnel to the KVM host, as a Service.
+
+With a remote hypervisor the cluster VM subnets are not routable from the platform, so every
+kubectl/helm call is proxied through an SSH tunnel (internal/kvmhost stamps it into the kubeconfig as
+`proxy-url`, which client-go honours). The WORKER opens that tunnel itself, inside its own pod - it
+already holds the hypervisor key, and a pod's loopback is private to it, so replicas never collide.
+
+The SHELL SANDBOX cannot do the same, and deliberately so: opening a tunnel means holding the key to
+the hypervisor, and that is precisely the credential we refuse to put in the container users get an
+interactive shell in. So the key lives here instead - in a pod that runs no user code, has no exec
+surface anyone is handed, and exposes nothing but a SOCKS port. The sandbox gets a hostname, not a
+secret.
+
+Replicated like everything else: it is a stateless proxy, so the Service spreads sessions over the
+replicas and a pod dying costs only the connections it was carrying.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-socks
+  labels:
+    {{- include "kaas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: socks
+spec:
+  replicas: {{ .Values.kvm.socks.tunnel.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "kaas.selectorLabels" (dict "ctx" . "component" "socks") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kaas.labels" . | nindent 8 }}
+        app.kubernetes.io/component: socks
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        # Makes the mounted key group-readable by the running user (Kubernetes chowns secret volumes
+        # to fsGroup). ssh still refuses a group-readable key, so the command below copies it to a
+        # 0400 private copy first - the usual dance for an unprivileged ssh in a pod.
+        fsGroup: 65534
+      containers:
+        - name: tunnel
+          # The worker image, for its ssh client alone - no worker process runs here.
+          image: {{ include "kaas.image" (dict "ctx" . "component" "worker") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              # ssh rejects a key any group can read, and a projected Secret is group-readable.
+              cp /keys/kvm /tmp/id && chmod 400 /tmp/id
+              exec ssh -N -T \
+                -D 0.0.0.0:{{ .Values.kvm.socks.port }} \
+                -i /tmp/id \
+                -p {{ .Values.kvm.sshPort }} \
+                -o ExitOnForwardFailure=yes \
+                -o ServerAliveInterval=15 \
+                -o ServerAliveCountMax=3 \
+                {{- if .Values.kvm.ssh.knownHosts }}
+                -o StrictHostKeyChecking=yes \
+                -o UserKnownHostsFile=/keys/kvm_known_hosts \
+                {{- else }}
+                {{- /* No host-key pinning: the first connection trusts whatever answers. A demo
+                       shortcut, exactly as in internal/kvmhost - set kvm.ssh.knownHosts for real use. */}}
+                -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null \
+                {{- end }}
+                {{ .Values.kvm.sshUser }}@{{ .Values.kvm.host }}
+          ports:
+            - name: socks
+              containerPort: {{ .Values.kvm.socks.port }}
+          env:
+            - name: HOME
+              value: /tmp
+          readinessProbe:
+            tcpSocket:
+              port: socks
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            # If the SSH session dies the port stops accepting; let the kubelet restart us rather
+            # than leaving every kubectl in the platform pointed at a dead proxy.
+            tcpSocket:
+              port: socks
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.kvm.socks.tunnel.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: keys
+              mountPath: /keys
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: keys
+          secret:
+            secretName: {{ include "kaas.secretName" . }}
+            defaultMode: 0440
+            items:
+              - key: kvm-ssh-private-key
+                path: kvm
+              {{- if .Values.kvm.ssh.knownHosts }}
+              - key: kvm-known-hosts
+                path: kvm_known_hosts
+              {{- end }}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-socks
+  labels:
+    {{- include "kaas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: socks
+spec:
+  type: ClusterIP
+  ports:
+    - name: socks
+      port: {{ .Values.kvm.socks.port }}
+      targetPort: socks
+  selector:
+    {{- include "kaas.selectorLabels" (dict "ctx" . "component" "socks") | nindent 4 }}
+{{- end }}

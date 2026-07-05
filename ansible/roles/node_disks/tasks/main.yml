@@ -1,0 +1,15 @@
+---
+# Format and mount this node's extra disks with LVM, from the per-host `node_disks` inventory var
+# (written by internal/config/ansible). Each entry: {name, device_id, mount_path, fs_type}.
+#
+# The real work is per-disk and lives in disk.yml; looping an include keeps each step readable with a
+# plain `disk.*` variable, rather than the parallel-list gymnastics a task-level loop would need to
+# carry a resolved device path alongside its definition.
+#
+# A node with no extra disks (the overwhelmingly common case) runs zero tasks.
+- name: Configure each extra disk
+  ansible.builtin.include_tasks: disk.yml
+  loop: "{{ node_disks | default([]) }}"
+  loop_control:
+    loop_var: disk
+    label: "{{ disk.name }} -> {{ disk.mount_path }}"

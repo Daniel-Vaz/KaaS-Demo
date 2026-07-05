@@ -1,0 +1,12 @@
+---
+# Install the cluster CNI (Cilium). Invoked by internal/config/ansible.InstallCNI with
+# extra-vars `pod_cidr` and `cni_version`; `cni` is also passed (cluster provenance) though
+# the role doesn't currently branch on it, since Cilium is the only supported CNI.
+# Runs once on the first control plane using the admin kubeconfig (Cilium is a cluster-wide
+# install, so for an HA control plane it must not run on every node).
+- name: Install CNI
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  roles:
+    - cni

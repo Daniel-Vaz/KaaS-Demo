@@ -1,0 +1,217 @@
+---
+# Apply read-only RBAC and mint a viewer kubeconfig on the first control plane, then fetch it back to
+# the controller (the Go wrapper reads artifacts_dir/viewer.conf). Idempotent: `kubectl apply` plus a
+# deterministically named token Secret, so re-runs converge. Runs with the node's super-admin.conf
+# (not admin.conf) - this role can run early in bootstrap, when admin.conf's kubeadm:cluster-admins
+# ClusterRoleBinding may not have propagated through the RBAC authorizer's cache yet; super-admin.conf
+# bypasses RBAC (system:masters) so it isn't subject to that race. This is purely provisioning-time
+# tooling to construct the (unprivileged) viewer credential - it doesn't change what the viewer gets.
+#
+# The viewer is a "kaas-viewer" ServiceAccount bound to the built-in `view` ClusterRole (namespaced
+# read, no secrets) plus a small cluster-scoped read role (nodes/namespaces/PVs/storageclasses).
+# Read-only is enforced by the API server via RBAC - this credential can list but not mutate, and
+# deliberately cannot read secrets.
+#
+# The same manifest also carries the per-USER client-cert bindings (kaas:writers → cluster-admin,
+# kaas:readers → view + the cluster-scoped read role): a downloaded kubeconfig (App.DownloadKubeconfig)
+# authenticates as the tenant's own identity with one of those groups in its cert, and these bindings
+# are what turn the group into access. They live here because this role already runs once the API
+# server is up and is idempotent (kubectl apply). Group names come in as writers_group/readers_group,
+# templated from domain.KubeGroup* so the cert and the binding can never drift.
+
+- name: Stage the read-only viewer RBAC manifest
+  ansible.builtin.copy:
+    dest: /etc/kubernetes/kaas-viewer-rbac.yaml
+    mode: '0600'
+    content: |
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: kaas-viewer
+        namespace: kube-system
+      ---
+      # A bound, long-lived token Secret. Production would mint short-lived tokens (e.g. via OIDC or
+      # `kubectl create token`), but a downloadable kubeconfig must keep working, so we use a stable
+      # ServiceAccount-token Secret the token controller populates.
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: kaas-viewer-token
+        namespace: kube-system
+        annotations:
+          kubernetes.io/service-account.name: kaas-viewer
+      type: kubernetes.io/service-account-token
+      ---
+      # Cluster-scoped reads the built-in `view` role omits. Deliberately NOT secrets - a read-only
+      # user must not be able to exfiltrate cluster secrets.
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: kaas-viewer-cluster-read
+      rules:
+        - apiGroups: [""]
+          resources: ["nodes", "namespaces", "persistentvolumes"]
+          verbs: ["get", "list", "watch"]
+        - apiGroups: ["storage.k8s.io"]
+          resources: ["storageclasses"]
+          verbs: ["get", "list", "watch"]
+        - apiGroups: ["metrics.k8s.io"]
+          resources: ["nodes", "pods"]
+          verbs: ["get", "list"]
+        # The Gateway API, for the portal's Networking page. These are CRDs, and the built-in `view`
+        # ClusterRole only covers types labelled for its aggregation - which the Gateway API CRDs are
+        # not - so without this a read-role member's own credential cannot list the very Gateway the
+        # platform tells them to attach their routes to. Read-only, like everything else here.
+        - apiGroups: ["gateway.networking.k8s.io"]
+          resources:
+            - "gatewayclasses"
+            - "gateways"
+            - "httproutes"
+            - "grpcroutes"
+            - "tcproutes"
+            - "tlsroutes"
+            - "udproutes"
+            - "referencegrants"
+          verbs: ["get", "list", "watch"]
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: kaas-viewer-view
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: view
+      subjects:
+        - kind: ServiceAccount
+          name: kaas-viewer
+          namespace: kube-system
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: kaas-viewer-cluster-read
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: kaas-viewer-cluster-read
+      subjects:
+        - kind: ServiceAccount
+          name: kaas-viewer
+          namespace: kube-system
+      ---
+      # Per-USER client-certificate access, tied to the platform's read/write role. A downloaded
+      # kubeconfig (App.DownloadKubeconfig) carries the user's identity as CN and their resolved
+      # access as the cert's Subject Organization - O=kaas:writers or O=kaas:readers
+      # (domain.KubeGroupForRole). The apiserver sees the user in that Kubernetes GROUP, and these two
+      # bindings map the group to a role. Encoding the resolved role (not the raw directory groups)
+      # keeps this static and untenanted: the tenancy decision is made in the portal (accessTo) at
+      # download time, so every cluster carries the same two bindings. Writer access is cluster-admin
+      # via an RBAC binding - NOT system:masters - so it is itself auditable and can be unbound.
+      # Group names are templated from Go (domain.KubeGroup*) so the cert and the binding never drift.
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: kaas-writers-admin
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: cluster-admin
+      subjects:
+        - kind: Group
+          name: "{{ writers_group }}"
+          apiGroup: rbac.authorization.k8s.io
+      ---
+      # Readers get exactly the shared viewer ServiceAccount's surface: the built-in `view` plus the
+      # cluster-scoped reads it omits (defined above), never secrets.
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: kaas-readers-view
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: view
+      subjects:
+        - kind: Group
+          name: "{{ readers_group }}"
+          apiGroup: rbac.authorization.k8s.io
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: kaas-readers-cluster-read
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: kaas-viewer-cluster-read
+      subjects:
+        - kind: Group
+          name: "{{ readers_group }}"
+          apiGroup: rbac.authorization.k8s.io
+
+- name: Apply the viewer RBAC
+  ansible.builtin.command: kubectl --kubeconfig /etc/kubernetes/super-admin.conf apply -f /etc/kubernetes/kaas-viewer-rbac.yaml
+  register: viewer_apply
+  changed_when: "'created' in viewer_apply.stdout or 'configured' in viewer_apply.stdout"
+
+- name: Wait for the viewer token Secret to be populated
+  ansible.builtin.command: >
+    kubectl --kubeconfig /etc/kubernetes/super-admin.conf
+    -n kube-system get secret kaas-viewer-token -o jsonpath={.data.token}
+  register: viewer_token_b64
+  until: viewer_token_b64.stdout | length > 0
+  retries: 10
+  delay: 3
+  changed_when: false
+
+- name: Read the cluster CA (base64) from admin.conf
+  ansible.builtin.command: >
+    kubectl --kubeconfig /etc/kubernetes/super-admin.conf
+    config view --raw --minify -o jsonpath={.clusters[0].cluster.certificate-authority-data}
+  register: viewer_ca_b64
+  changed_when: false
+
+- name: Read the API server URL from admin.conf
+  ansible.builtin.command: >
+    kubectl --kubeconfig /etc/kubernetes/super-admin.conf
+    config view --minify -o jsonpath={.clusters[0].cluster.server}
+  register: viewer_server
+  changed_when: false
+
+- name: Render the viewer kubeconfig on the node
+  ansible.builtin.copy:
+    dest: /etc/kubernetes/kaas-viewer.conf
+    mode: '0600'
+    content: |
+      apiVersion: v1
+      kind: Config
+      clusters:
+      - name: {{ cluster_name }}
+        cluster:
+          server: {{ viewer_server.stdout }}
+          certificate-authority-data: {{ viewer_ca_b64.stdout }}
+      users:
+      - name: kaas-viewer
+        user:
+          token: {{ viewer_token_b64.stdout | b64decode }}
+      contexts:
+      - name: kaas-viewer@{{ cluster_name }}
+        context:
+          cluster: {{ cluster_name }}
+          user: kaas-viewer
+      current-context: kaas-viewer@{{ cluster_name }}
+
+- name: Ensure artifacts dir exists on the controller
+  ansible.builtin.file:
+    path: "{{ artifacts_dir }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  become: false
+
+- name: Fetch the viewer kubeconfig back to the controller
+  ansible.builtin.fetch:
+    src: /etc/kubernetes/kaas-viewer.conf
+    dest: "{{ artifacts_dir }}/viewer.conf"
+    flat: true

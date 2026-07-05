@@ -1,0 +1,18 @@
+/* The per-row SSH action is revealed on row hover (or keyboard focus) so the table stays scannable,
+   but it must remain reachable without a mouse - hence focus-within and the coarse-pointer fallback. */
+.sshAction {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.row:hover .sshAction,
+.row:focus-within .sshAction {
+  opacity: 1;
+}
+
+/* Touch devices have no hover - keep the action permanently visible there. */
+@media (hover: none) {
+  .sshAction {
+    opacity: 1;
+  }
+}

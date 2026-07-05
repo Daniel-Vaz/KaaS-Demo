@@ -1,0 +1,154 @@
+---
+# Stage and apply the cluster's default north-south ingress on the first control plane, with
+# admin.conf. Idempotent: `kubectl apply` of a fixed manifest, so re-runs converge (changed only
+# when kubectl actually created/configured something). This role runs post-Ready - well after the
+# kubeadm:cluster-admins RBAC binding has propagated - so admin.conf suffices (unlike the viewer role,
+# which runs early in bootstrap and needs super-admin.conf).
+#
+# The manifest is up to three halves:
+#   - MetalLB: a single-address (/32) IPAddressPool built from the reserved load_balancer_ip, plus an
+#     L2Advertisement so MetalLB answers ARP for it on the node network. autoAssign is on, so with
+#     exactly one address in the only pool any LoadBalancer Service (here, the Envoy Gateway's) gets it.
+#   - Envoy Gateway: the GatewayClass (the cluster's default Gateway API, controller
+#     gateway.envoyproxy.io/gatewayclass-controller) and a default Gateway bound to it. spec.addresses
+#     pins the Gateway's external address to the reserved IP explicitly (belt-and-suspenders with the
+#     single-IP pool). An HTTP :80 listener open to routes from every namespace - the default entry
+#     point apps attach HTTPRoutes to - and, when TLS is enabled, an HTTPS :443 listener beside it.
+#   - cert-manager (only when the cert-manager add-on is on the cluster): a self-signed ClusterIssuer,
+#     and - when the cluster owns an apps domain - a wildcard Certificate for "*.<apps domain>" whose
+#     Secret the HTTPS listener terminates. cert-manager issues the cert asynchronously; the listener
+#     tolerates the not-yet-present Secret and programs itself once it appears, so a single idempotent
+#     apply converges with nothing to wait on.
+#
+# Vars from Go (EnsureDefaultGateway): load_balancer_ip (the cluster's reserved address), cert_manager
+# (bool, whether the add-on is on the cluster) and apps_domain (the cluster's admission-derived apps
+# domain, possibly empty). The namespaces (metallb-system / envoy-gateway-system) are the add-ons'
+# install namespaces and already exist because this runs after both charts installed with
+# --create-namespace.
+
+- name: Refuse to proceed without a reserved LoadBalancer IP
+  # The reconciler already gates on this, but a missing address would render a broken pool, so fail
+  # loudly rather than apply "/32" onto nothing.
+  ansible.builtin.assert:
+    that:
+      - load_balancer_ip is defined
+      - load_balancer_ip | length > 0
+    fail_msg: "load_balancer_ip is required to configure the default MetalLB pool / Envoy Gateway"
+
+- name: Decide whether the default Gateway terminates TLS
+  # TLS needs both cert-manager (to issue the cert) and an apps domain (a hostname to issue it FOR).
+  # Without a domain there is nothing to secure by default - the ClusterIssuer is still created so a
+  # user can annotate their own routes, but the platform adds no HTTPS listener.
+  ansible.builtin.set_fact:
+    gateway_tls_enabled: "{{ (cert_manager | default(false) | bool) and (apps_domain | default('') | length > 0) }}"
+
+- name: Stage the cert-manager issuer and wildcard certificate
+  # A single self-signed ClusterIssuer (each issued cert is its own root - a deliberate demo shortcut;
+  # production would run a trusted CA or ACME). The wildcard Certificate lands in the Gateway's own
+  # namespace so the listener can reference its Secret with no ReferenceGrant, and covers both the
+  # apex apps domain and everything under it.
+  ansible.builtin.copy:
+    dest: /etc/kubernetes/kaas-cert-manager.yaml
+    mode: '0600'
+    content: |
+      apiVersion: cert-manager.io/v1
+      kind: ClusterIssuer
+      metadata:
+        name: kaas-selfsigned
+      spec:
+        selfSigned: {}
+      {% if gateway_tls_enabled %}
+      ---
+      apiVersion: cert-manager.io/v1
+      kind: Certificate
+      metadata:
+        name: kaas-default-apps
+        namespace: envoy-gateway-system
+      spec:
+        secretName: kaas-default-tls
+        dnsNames:
+          - "{{ apps_domain }}"
+          - "*.{{ apps_domain }}"
+        issuerRef:
+          name: kaas-selfsigned
+          kind: ClusterIssuer
+          group: cert-manager.io
+      {% endif %}
+  when: cert_manager | default(false) | bool
+
+- name: Apply the cert-manager issuer and wildcard certificate
+  ansible.builtin.command: kubectl --kubeconfig /etc/kubernetes/admin.conf apply -f /etc/kubernetes/kaas-cert-manager.yaml
+  register: certmanager_apply
+  changed_when: "'created' in certmanager_apply.stdout or 'configured' in certmanager_apply.stdout"
+  when: cert_manager | default(false) | bool
+
+- name: Stage the default gateway manifest
+  ansible.builtin.copy:
+    dest: /etc/kubernetes/kaas-default-gateway.yaml
+    mode: '0600'
+    content: |
+      apiVersion: metallb.io/v1beta1
+      kind: IPAddressPool
+      metadata:
+        name: default-pool
+        namespace: metallb-system
+      spec:
+        addresses:
+          - "{{ load_balancer_ip }}/32"
+        autoAssign: true
+      ---
+      apiVersion: metallb.io/v1beta1
+      kind: L2Advertisement
+      metadata:
+        name: default-l2
+        namespace: metallb-system
+      spec:
+        ipAddressPools:
+          - default-pool
+      ---
+      # The cluster's default Gateway API implementation.
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: GatewayClass
+      metadata:
+        name: eg
+      spec:
+        controllerName: gateway.envoyproxy.io/gatewayclass-controller
+      ---
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: Gateway
+      metadata:
+        name: eg
+        namespace: envoy-gateway-system
+      spec:
+        gatewayClassName: eg
+        addresses:
+          - type: IPAddress
+            value: "{{ load_balancer_ip }}"
+        listeners:
+          - name: http
+            protocol: HTTP
+            port: 80
+            allowedRoutes:
+              namespaces:
+                from: All
+      {% if gateway_tls_enabled %}
+          # HTTPS terminated with the self-signed wildcard cert above. Scoped to the apps domain by
+          # hostname so it only serves names the wildcard cert actually covers.
+          - name: https
+            protocol: HTTPS
+            port: 443
+            hostname: "*.{{ apps_domain }}"
+            tls:
+              mode: Terminate
+              certificateRefs:
+                - kind: Secret
+                  name: kaas-default-tls
+            allowedRoutes:
+              namespaces:
+                from: All
+      {% endif %}
+
+- name: Apply the default gateway manifest
+  ansible.builtin.command: kubectl --kubeconfig /etc/kubernetes/admin.conf apply -f /etc/kubernetes/kaas-default-gateway.yaml
+  register: gateway_apply
+  changed_when: "'created' in gateway_apply.stdout or 'configured' in gateway_apply.stdout"

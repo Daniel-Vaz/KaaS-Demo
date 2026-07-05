@@ -1,0 +1,21 @@
+---
+# Observe the cluster's etcd backend store. Invoked by internal/config/ansible.EtcdStatus with
+# extra-vars artifacts_dir. Read-only - it takes no locks, restarts nothing, and is safe to run on
+# any Ready cluster at any time, which is what lets the reconciler poll it on a cadence.
+#
+# One play on ONE control plane: `endpoint status --cluster` has etcdctl query every member, so an
+# HA cluster costs the same single ansible run as a single-node one.
+#
+# The role's tasks are pulled in with import_role + tasks_from - NOT the play-level `roles:` keyword,
+# which silently ignores tasks_from (ansible-core treats it as a role var and loads tasks/main.yml,
+# which this role doesn't have), so the play would run zero tasks.
+
+- name: Read the cluster's etcd backend-store status
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Observe every etcd member
+      ansible.builtin.import_role:
+        name: etcd_maintenance
+        tasks_from: status.yml

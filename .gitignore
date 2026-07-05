@@ -1,0 +1,36 @@
+# Go
+/bin/
+*.test
+*.out
+coverage.*
+
+# Local env / secrets
+.env
+*.pem
+*.key
+
+# Real directory-auth config (deploy/ldap.example.yaml IS tracked and is what compose mounts by
+# default; a real one names your DCs and service account, so keep it out of the repo).
+deploy/ldap.yaml
+
+# Terraform / OpenTofu state (per-cluster; treated as derived - ADR-004)
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Packer
+packer/build/
+packer/output/
+packer/output-*/
+*.qcow2
+*.img
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Local tests
+scripts/govc-list-ips.sh
+deploy/ldap.yaml

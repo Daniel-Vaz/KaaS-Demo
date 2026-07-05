@@ -1,0 +1,93 @@
+---
+# Node-level prerequisites the catalog's longhorn add-on needs
+# (https://longhorn.io/docs/1.12.0/deploy/install/): iscsi/nfs/crypto tooling, the V1 (iSCSI) and
+# V2 (SPDK/NVMe-oF) data engine kernel modules, and hugepages for V2.
+#
+# This role is deliberately BAKED INTO THE GOLDEN IMAGE ONLY - it is invoked by
+# ansible/playbooks/golden-image.yml (which every Packer build runs) and by nothing on the
+# provisioning path. Splitting it out of the `common` role is what makes cluster-create faster: the
+# packages/modules are already present on every node the moment it boots, so bootstrap/join no longer
+# pay an apt round-trip for them. Everything here persists in the image via /etc config files, so a
+# cloned node applies it at first boot with no Ansible re-run.
+#
+# Shortcut, in the repo's style: because these prereqs no longer run at provision time, a cluster
+# built from a STOCK base image (the KAAS_BASE_IMAGE fallback, not a golden image) would come up
+# without them and Longhorn would be degraded. Production would either always bake a golden image or
+# keep a lightweight provision-time convergence check; here the golden image is the supported path.
+# Idempotent, and a near no-op on an image where these are already pre-baked. Ubuntu-focused.
+
+- name: Install Longhorn prerequisite packages
+  ansible.builtin.apt:
+    name:
+      - open-iscsi   # iscsid daemon - required by the V1 (iSCSI) data engine
+      - nfs-common   # NFSv4 client - required for backups and RWX volumes
+      - cryptsetup   # LUKS2 volume encryption
+      - dmsetup      # device-mapper CLI
+      - util-linux   # findmnt, blkid, lsblk
+      - gawk
+    state: present
+    update_cache: true
+
+- name: Enable and start iscsid
+  ansible.builtin.systemd:
+    name: iscsid
+    enabled: true
+    state: started
+
+- name: Determine running kernel release
+  # gather_facts may be off, so shell out rather than rely on ansible_kernel.
+  ansible.builtin.command: uname -r
+  register: longhorn_kernel_release
+  changed_when: false
+
+- name: Install extra kernel modules package for Longhorn V2 data engine
+  ansible.builtin.apt:
+    name: "linux-modules-extra-{{ longhorn_kernel_release.stdout }}"
+    state: present
+  register: longhorn_modules_extra
+  failed_when: false
+  # Best-effort: the V2 (SPDK) data engine needs vfio_pci/uio_pci_generic/nvme-tcp, but a
+  # cloud/virtual kernel flavor may not ship a modules-extra package at all, and the catalog's
+  # longhorn add-on doesn't turn V2 on by default - this must not fail the V1 golden path.
+
+- name: Load the V1 data engine kernel module on boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/longhorn.conf
+    content: |
+      iscsi_tcp
+    mode: '0644'
+
+- name: Load the V1 data engine kernel module now
+  ansible.builtin.command: modprobe iscsi_tcp
+  changed_when: false
+
+- name: Load Longhorn V2 data engine kernel modules on boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/longhorn-v2.conf
+    content: |
+      vfio_pci
+      uio_pci_generic
+      nvme-tcp
+    mode: '0644'
+
+- name: Load Longhorn V2 data engine kernel modules now
+  ansible.builtin.command: "modprobe {{ item }}"
+  loop:
+    - vfio_pci
+    - uio_pci_generic
+    - nvme-tcp
+  changed_when: false
+  failed_when: false
+  # Best-effort, same reasoning as the modules-extra install above.
+
+- name: Sysctl for Longhorn V2 hugepages
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-longhorn.conf
+    content: |
+      # 2 GiB of 2 MiB-sized hugepages, as required by Longhorn's V2 (SPDK) data engine.
+      vm.nr_hugepages = 1024
+    mode: '0644'
+
+- name: Apply sysctl
+  ansible.builtin.command: sysctl --system
+  changed_when: false

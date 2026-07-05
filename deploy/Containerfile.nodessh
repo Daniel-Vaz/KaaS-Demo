@@ -1,0 +1,41 @@
+# Build the node-ssh agent as its own MINIMAL sandbox image - the isolated environment users'
+# per-node SSH sessions (Nodes tab → SSH) run in. Its containment story is the INVERSE of the shell
+# sandbox: that one is safe because it holds no secrets, so a shell escape finds nothing; THIS one
+# necessarily holds the platform's VM SSH key (you cannot ssh to a node without it), so it is made
+# safe by holding no SHELL - the only program it ever starts is `ssh` to a caller-named node IP
+# (internal/nodessh/sshpty). No bash, no kubectl, no infra tooling: there is no session from which to
+# read the key it carries. That is why it is a separate binary and image from the shell agent rather
+# than a flag on it. See internal/nodessh and cmd/node-ssh-agent.
+FROM docker.io/library/golang:1.26 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/node-ssh-agent ./cmd/node-ssh-agent
+
+FROM docker.io/library/ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# openssh-client is the whole toolchain of this sandbox - deliberately NO shell beyond what the base
+# image ships and NO kubectl/infra tooling. ca-certificates is unused by ssh but harmless; kept off.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      openssh-client \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /out/node-ssh-agent /usr/local/bin/node-ssh-agent
+
+# This sandbox runs as ROOT - unlike the shell sandbox, and deliberately. It must PRESENT the
+# platform's VM private key to `ssh`, and ssh's client refuses any key that is group/other-readable
+# ("too open"), so the key stays mode 0600 and only its OWNER can read it. Under rootless podman the
+# mounted key is owned by container-uid-0 (the host user maps there); in Kubernetes a Secret file is
+# root-owned 0400 - either way, reading it means being uid 0. So root is a hard requirement of
+# holding the key, not a relaxation: the worker, which holds the same key, runs as root for the same
+# reason. Containment does not rest on the uid here - it rests on there being NO shell session (the
+# agent only ever execs ssh) plus, from compose/Helm, all caps dropped, no-new-privileges, a
+# read-only rootfs, and none of the worker's other power (no DB, libvirt socket or KAAS_SECRET_KEY).
+# Under rootless podman this "root" is an unprivileged host user with no capabilities regardless.
+# Production would fork the ssh child under an unprivileged uid from a privileged supervisor that
+# reads the key, and/or mint a short-lived per-session certificate from an SSH CA (see internal/nodessh).
+
+ENTRYPOINT ["node-ssh-agent"]

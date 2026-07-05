@@ -1,0 +1,97 @@
+---
+# In-place kubeadm upgrade of a single node to {{ k8s_version }} (minor {{ k8s_minor }}). Used by
+# ansible/playbooks/upgrade.yml. `upgrade_apply` selects the control-plane primary path
+# (`kubeadm upgrade apply`) vs. the secondary/worker path (`kubeadm upgrade node`).
+#
+# Idempotent: a node already running the target kubelet version is skipped wholesale via the
+# `needs_upgrade` guard, so re-running (the reconciler retries every phase) is a near no-op.
+
+- name: Detect the running kubelet version
+  ansible.builtin.command: kubelet --version
+  register: kubelet_version
+  changed_when: false
+  failed_when: false
+
+- name: Decide whether this node needs upgrading
+  # `kubelet --version` prints e.g. "Kubernetes v1.36.2"; upgrade only if it isn't already target.
+  ansible.builtin.set_fact:
+    needs_upgrade: "{{ ('v' + k8s_version) not in (kubelet_version.stdout | default('')) }}"
+
+- name: Point the Kubernetes apt repo at the target minor
+  # Same repo/keyring the `common` role manages, re-pointed to {{ k8s_minor }} so the target
+  # packages resolve. get_url/apt_repository are idempotent when already at this minor.
+  when: needs_upgrade | bool
+  block:
+    - name: Refresh the Kubernetes apt signing key for the target minor
+      ansible.builtin.get_url:
+        url: "https://pkgs.k8s.io/core:/stable:/v{{ k8s_minor }}/deb/Release.key"
+        dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+        mode: '0644'
+        force: true
+
+    - name: Point the Kubernetes apt repository at the target minor
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.asc] https://pkgs.k8s.io/core:/stable:/v{{ k8s_minor }}/deb/ /"
+        filename: kubernetes
+        state: present
+
+    - name: Install the target kubeadm (unhold, install pinned, re-hold)
+      ansible.builtin.apt:
+        name: "kubeadm={{ k8s_version }}-*"
+        state: present
+        update_cache: true
+        allow_change_held_packages: true
+
+    - name: Hold kubeadm at the target version
+      ansible.builtin.dpkg_selections:
+        name: kubeadm
+        selection: hold
+
+    - name: kubeadm upgrade apply (first control plane)
+      ansible.builtin.command: "kubeadm upgrade apply -y v{{ k8s_version }}"
+      when: upgrade_apply | default(false) | bool
+      changed_when: true
+
+    - name: kubeadm upgrade node (other control planes and workers)
+      ansible.builtin.command: kubeadm upgrade node
+      when: not (upgrade_apply | default(false) | bool)
+      changed_when: true
+
+    - name: Drain the node before the kubelet bump
+      # Delegated to the first control plane so workers (no admin.conf) can still be drained.
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/admin.conf drain {{ inventory_hostname }}
+        --ignore-daemonsets --delete-emptydir-data --force --timeout=120s
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      register: drain
+      failed_when: false
+      changed_when: "'drained' in (drain.stdout | default(''))"
+
+    - name: Install the target kubelet and kubectl (unhold, install pinned, re-hold)
+      ansible.builtin.apt:
+        name:
+          - "kubelet={{ k8s_version }}-*"
+          - "kubectl={{ k8s_version }}-*"
+        state: present
+        update_cache: true
+        allow_change_held_packages: true
+
+    - name: Hold kubelet and kubectl at the target version
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubectl
+
+    - name: Restart kubelet on the new version
+      ansible.builtin.systemd:
+        name: kubelet
+        daemon_reload: true
+        state: restarted
+
+    - name: Uncordon the node
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/admin.conf uncordon {{ inventory_hostname }}
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      changed_when: true

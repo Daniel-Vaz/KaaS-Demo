@@ -1,0 +1,41 @@
+---
+# Compute the earliest expiry across this control plane's certificates and hand it back to the
+# controller (the Go wrapper reads artifacts_dir/cert-expiry as Unix epoch seconds). Read-only.
+# Invoked standalone by internal/config/ansible.CertExpiry (check-cert-expiration.yml) and as the
+# reporting step after renewal (renew-certs.yml).
+#
+# We take the MINIMUM notAfter over every leaf certificate under /etc/kubernetes/pki. The CA certs
+# live there too but are 10-year, so they never win the minimum - the result is the earliest LEAF
+# expiry, which is exactly what rotation keys on. A faithful proxy for the whole kubeadm PKI that
+# needs no fragile parsing of `kubeadm certs check-expiration`'s table.
+
+- name: Compute the earliest certificate expiry (Unix epoch seconds)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    min=
+    for f in $(find /etc/kubernetes/pki -name '*.crt'); do
+      end=$(openssl x509 -enddate -noout -in "$f" | cut -d= -f2)
+      e=$(date -d "$end" +%s)
+      if [ -z "$min" ] || [ "$e" -lt "$min" ]; then min=$e; fi
+    done
+    echo "$min"
+  args:
+    executable: /bin/bash
+  register: cert_min_epoch
+  changed_when: false
+
+- name: Ensure artifacts dir exists on the controller
+  ansible.builtin.file:
+    path: "{{ artifacts_dir }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  become: false
+
+- name: Save the earliest expiry to the controller
+  ansible.builtin.copy:
+    content: "{{ cert_min_epoch.stdout | trim }}\n"
+    dest: "{{ artifacts_dir }}/cert-expiry"
+    mode: '0600'
+  delegate_to: localhost
+  become: false

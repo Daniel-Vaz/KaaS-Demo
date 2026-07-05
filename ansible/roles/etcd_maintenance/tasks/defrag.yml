@@ -1,0 +1,133 @@
+---
+# Defragment THIS control plane's etcd member. Invoked per node from etcd-defrag.yml's serial:1 play,
+# so only one member is ever affected at a time.
+#
+# Defragmentation rebuilds the bbolt backend file to reclaim the space compaction freed logically. It
+# is STOP-THE-WORLD for the member it runs on: etcd holds the file lock and answers nothing until it
+# finishes. Three properties make that safe, and all three are load-bearing:
+#
+#   1. One member at a time (the play's serial:1) plus the health gate at the bottom, which does not
+#      let the play advance until this member is back in quorum. On HA the API stays served by the
+#      peers throughout; on a SINGLE control plane this is a brief API outage, the same trade the
+#      etcd restore path already makes.
+#   2. Leadership is moved off this member first. Defragmenting the raft leader stalls it long enough
+#      to trigger an election, which is a needless extra disruption when handing leadership over
+#      first costs milliseconds.
+#   3. A member already below the fragmentation threshold is SKIPPED. That is what makes a retried
+#      run resume: the reconcile job can be killed by its timeout mid-play and River re-runs the
+#      step, and without the per-member re-check the retry would bounce every member again.
+#
+# The health gate runs on EVERY node, skipped or not, for the same reason renew_certs' wait does:
+# the play must never advance to the next member while this one is still settling.
+
+- name: Resolve this node's etcd pod
+  ansible.builtin.import_tasks: pod.yml
+
+- name: Converge this member's backend tuning
+  ansible.builtin.import_tasks: tune.yml
+
+- name: Wait for this etcd member to be healthy before touching it
+  # Covers both a restart triggered by the tuning above and a peer defragmented moments ago on the
+  # previous serial iteration. `endpoint health` returns non-zero unless the member is serving.
+  ansible.builtin.command: >
+    kubectl --kubeconfig {{ kubeconfig }} -n kube-system exec {{ etcd_pod }} --
+    etcdctl {{ etcd_certs }} endpoint health
+  register: etcd_pre_health
+  until: etcd_pre_health.rc == 0
+  retries: 60
+  delay: 5
+  changed_when: false
+
+- name: Read this member's backend-store status
+  ansible.builtin.command: >
+    kubectl --kubeconfig {{ kubeconfig }} -n kube-system exec {{ etcd_pod }} --
+    etcdctl {{ etcd_certs }} endpoint status -w json
+  register: etcd_local_status
+  until: etcd_local_status.rc == 0
+  retries: 10
+  delay: 5
+  changed_when: false
+
+- name: Check whether this member has an alarm armed
+  ansible.builtin.command: >
+    kubectl --kubeconfig {{ kubeconfig }} -n kube-system exec {{ etcd_pod }} --
+    etcdctl {{ etcd_certs }} alarm list
+  register: etcd_member_alarms
+  until: etcd_member_alarms.rc == 0
+  retries: 10
+  delay: 5
+  changed_when: false
+
+- name: Compute this member's fragmentation
+  # Integer percent, deliberately: this is a threshold comparison, not a measurement, and integer
+  # arithmetic in Jinja is one less thing to get subtly wrong. A zero-size store (a member that has
+  # somehow only just started) reports 0% and is skipped.
+  ansible.builtin.set_fact:
+    etcd_member_db: "{{ (etcd_local_status.stdout | from_json)[0].Status.dbSize | int }}"
+    etcd_member_in_use: "{{ (etcd_local_status.stdout | from_json)[0].Status.dbSizeInUse | int }}"
+    etcd_member_id: "{{ (etcd_local_status.stdout | from_json)[0].Status.header.member_id | int }}"
+    etcd_leader_id: "{{ (etcd_local_status.stdout | from_json)[0].Status.leader | int }}"
+
+- name: Defragment this member
+  when: >-
+    (etcd_member_db | int) > 0
+    and (
+      (((etcd_member_db | int) - (etcd_member_in_use | int)) * 100 // (etcd_member_db | int))
+        >= ((etcd_defrag_min_ratio | float) * 100) | int
+      or (etcd_member_alarms.stdout | trim | length) > 0
+    )
+  block:
+    - name: List the etcd members (to pick a leadership transferee)
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig }} -n kube-system exec {{ etcd_pod }} --
+        etcdctl {{ etcd_certs }} member list -w json
+      register: etcd_member_list
+      when: (etcd_member_id | int) == (etcd_leader_id | int)
+      changed_when: false
+
+    - name: Move raft leadership off this member
+      # Only when this member IS the leader and there is somewhere to move it to. `move-leader` must
+      # be issued TO the leader, which is why every etcdctl call here targets the pod's own default
+      # endpoint (127.0.0.1:2379) rather than the cluster.
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig }} -n kube-system exec {{ etcd_pod }} --
+        etcdctl {{ etcd_certs }} move-leader {{ etcd_transferee }}
+      vars:
+        etcd_transferee: >-
+          {{ ((etcd_member_list.stdout | default('{}') | from_json).members | default([]))
+             | rejectattr('ID', 'equalto', etcd_member_id | int)
+             | map(attribute='ID') | list | first | default('') }}
+      when:
+        - (etcd_member_id | int) == (etcd_leader_id | int)
+        - etcd_transferee | string | length > 0
+      changed_when: true
+
+    - name: Defragment this member's backend store
+      # No --cluster: that would defragment every member at once and take the whole cluster down.
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig }} -n kube-system exec {{ etcd_pod }} --
+        etcdctl {{ etcd_certs }} --command-timeout={{ etcd_defrag_timeout }} defrag
+      changed_when: true
+
+    - name: Disarm any alarm the reclaimed space has cleared
+      # Defragmentation alone does NOT restore writes on a cluster that hit its quota: the NOSPACE
+      # alarm stays armed until it is explicitly disarmed, and while it is armed etcd remains
+      # read-only. Skipping this is the difference between "we reclaimed the space" and "the cluster
+      # works again". Cluster-wide and idempotent, so running it per member is harmless.
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig }} -n kube-system exec {{ etcd_pod }} --
+        etcdctl {{ etcd_certs }} alarm disarm
+      when: (etcd_member_alarms.stdout | trim | length) > 0
+      changed_when: true
+
+- name: Wait for this etcd member to rejoin quorum before the play advances
+  # Runs whether or not this member was defragmented - the play must not move to the next control
+  # plane while this one is still settling. This is the quorum guarantee.
+  ansible.builtin.command: >
+    kubectl --kubeconfig {{ kubeconfig }} -n kube-system exec {{ etcd_pod }} --
+    etcdctl {{ etcd_certs }} endpoint health
+  register: etcd_post_health
+  until: etcd_post_health.rc == 0
+  retries: 60
+  delay: 5
+  changed_when: false

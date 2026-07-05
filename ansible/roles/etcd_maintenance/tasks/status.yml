@@ -1,0 +1,88 @@
+---
+# Observe the cluster's etcd backend store and hand the raw readings back to the controller, which
+# parses them into domain.EtcdStatus (internal/config/ansible.EtcdStatus). Read-only throughout.
+#
+# Runs on ONE control plane and reports on all of them: `endpoint status --cluster` makes etcdctl
+# discover the member list and query every member, so an HA cluster costs one play, not three. That
+# also makes the member COUNT meaningful - a member that doesn't answer is simply absent from the
+# array, which is exactly how the reconciler learns it must not defragment right now.
+#
+# The parsing deliberately happens in Go, not in Jinja here: choosing which member's numbers
+# represent the cluster is a decision worth unit-testing (see internal/config/ansible/etcd_test.go),
+# and etcd's member ids are uint64s that no templating language should be asked to round-trip.
+#
+# Invoked standalone by EtcdStatus (etcd-status.yml) and as the reporting play after defragmentation
+# (etcd-defrag.yml), so a defrag returns the reclaimed size without a second observation pass.
+
+- name: Resolve this node's etcd pod
+  ansible.builtin.import_tasks: pod.yml
+
+- name: Read every etcd member's backend-store status
+  ansible.builtin.command: >
+    kubectl --kubeconfig {{ kubeconfig }} -n kube-system exec {{ etcd_pod }} --
+    etcdctl {{ etcd_certs }} endpoint status --cluster -w json
+  register: etcd_endpoint_status
+  until: etcd_endpoint_status.rc == 0
+  retries: 10
+  delay: 5
+  changed_when: false
+
+- name: List any armed etcd alarms
+  # Empty output means no alarm. A NOSPACE alarm here means the cluster is ALREADY read-only, which
+  # is the one condition that makes defragmentation urgent rather than housekeeping.
+  ansible.builtin.command: >
+    kubectl --kubeconfig {{ kubeconfig }} -n kube-system exec {{ etcd_pod }} --
+    etcdctl {{ etcd_certs }} alarm list
+  register: etcd_alarm_list
+  until: etcd_alarm_list.rc == 0
+  retries: 10
+  delay: 5
+  changed_when: false
+
+- name: Read this member's configured backend quota
+  # A FALLBACK for etcd 3.5 only. etcd 3.6+ reports the quota it is actually enforcing as
+  # `dbSizeQuota` in the endpoint status above, which the Go side prefers - the running process is
+  # the authority over the file on disk (a hand-edited manifest whose etcd has not restarted would
+  # make the two disagree, and only the process decides when the cluster goes read-only). This is
+  # still read unconditionally: it is one cheap grep, and skipping it would mean branching this play
+  # on the etcd version. Off the manifest rather than a metric, so it needs no monitoring add-on.
+  # No output means the flag is absent - i.e. etcd's own 2GiB default.
+  ansible.builtin.shell: |
+    set -euo pipefail
+    grep -oP -- '--quota-backend-bytes=\K[0-9]+' /etc/kubernetes/manifests/etcd.yaml || true
+  args:
+    executable: /bin/bash
+  register: etcd_quota
+  changed_when: false
+
+- name: Ensure artifacts dir exists on the controller
+  ansible.builtin.file:
+    path: "{{ artifacts_dir }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  become: false
+
+- name: Save the endpoint status to the controller
+  ansible.builtin.copy:
+    content: "{{ etcd_endpoint_status.stdout }}\n"
+    dest: "{{ artifacts_dir }}/etcd-status.json"
+    mode: '0600'
+  delegate_to: localhost
+  become: false
+
+- name: Save the alarm list to the controller
+  ansible.builtin.copy:
+    content: "{{ etcd_alarm_list.stdout }}\n"
+    dest: "{{ artifacts_dir }}/etcd-alarms"
+    mode: '0600'
+  delegate_to: localhost
+  become: false
+
+- name: Save the configured quota to the controller
+  ansible.builtin.copy:
+    content: "{{ etcd_quota.stdout | trim }}\n"
+    dest: "{{ artifacts_dir }}/etcd-quota"
+    mode: '0600'
+  delegate_to: localhost
+  become: false

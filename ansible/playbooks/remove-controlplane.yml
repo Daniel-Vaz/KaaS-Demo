@@ -1,0 +1,83 @@
+---
+# Rolling OS upgrade, control-plane step: drain the departing control plane, remove its etcd
+# member, and delete the node object - all from a SURVIVING control plane ({{ admin_host }}), so it
+# works even though the departing node's VM is about to be destroyed and re-created. Invoked by
+# internal/config/ansible.RemoveControlPlane with extra-vars remove_node + admin_host. Idempotent:
+# drain/delete tolerate absence and the member removal is guarded on the member still existing.
+#
+# admin_host is a node the reconciler considers "surviving", but if it was itself rolled onto the
+# new OS earlier in this SAME upgrade, its kube-apiserver/etcd/CNI may still be settling - `kubectl
+# exec` into its etcd pod (which proxies through the API server and kubelet) can then hit a
+# transient TLS handshake timeout. Every kubectl/etcdctl step here retries with a generous budget
+# instead of failing the whole hop on one blip.
+- name: Remove a control plane from the cluster
+  # admin_host (a surviving control plane) is passed as an extra-var at run time; the default keeps
+  # `ansible-playbook --syntax-check` resolvable without it.
+  hosts: "{{ admin_host | default('control_plane') }}"
+  become: true
+  gather_facts: false
+  vars:
+    kubeconfig: /etc/kubernetes/admin.conf
+    etcdctl_certs: >-
+      --cacert /etc/kubernetes/pki/etcd/ca.crt
+      --cert /etc/kubernetes/pki/etcd/server.crt
+      --key /etc/kubernetes/pki/etcd/server.key
+  tasks:
+    - name: Cordon and drain the departing control plane
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig }} drain {{ remove_node }}
+        --ignore-daemonsets --delete-emptydir-data --force --timeout=120s
+      register: drain
+      until: drain.rc == 0
+      retries: 10
+      delay: 10
+      failed_when: false
+      changed_when: "'drained' in (drain.stdout | default(''))"
+
+    - name: Find this control plane's etcd pod
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        kubectl --kubeconfig {{ kubeconfig }} -n kube-system get pods
+        -l component=etcd -o jsonpath='{.items[0].metadata.name}'
+      args:
+        executable: /bin/bash
+      register: etcd_pod
+      until: etcd_pod.rc == 0 and etcd_pod.stdout | trim | length > 0
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Look up the departing node's etcd member id
+      # `etcdctl member list` prints "<id>, <status>, <name>, <peerURLs>, <clientURLs>, <learner>".
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        kubectl --kubeconfig {{ kubeconfig }} -n kube-system exec {{ etcd_pod.stdout }} --
+        etcdctl {{ etcdctl_certs }} member list
+        | awk -F', ' '$3 == "{{ remove_node }}" {print $1}'
+      args:
+        executable: /bin/bash
+      register: etcd_member
+      until: etcd_member.rc == 0
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Remove the departing node's etcd member
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig }} -n kube-system exec {{ etcd_pod.stdout }} --
+        etcdctl {{ etcdctl_certs }} member remove {{ etcd_member.stdout | trim }}
+      when: etcd_member.stdout | trim | length > 0
+      register: member_remove
+      until: member_remove.rc == 0
+      retries: 30
+      delay: 10
+      changed_when: true
+
+    - name: Delete the departing node object
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig }} delete node {{ remove_node }} --ignore-not-found
+      register: node_delete
+      until: node_delete.rc == 0
+      retries: 30
+      delay: 10
+      changed_when: true

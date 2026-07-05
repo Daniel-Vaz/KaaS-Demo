@@ -1,0 +1,33 @@
+# Keep the image build context small and reproducible. Podman reads this (and .dockerignore).
+# The Go builder only needs source, go.mod/go.sum, and the go:embed catalog.json; the web image
+# builds the portal from web/portal/. Everything below is huge, host-specific, or derived.
+
+.git
+bin/
+*.test
+*.out
+coverage.*
+
+# Web portal build artifacts - node_modules is huge; dist is rebuilt inside the web image.
+web/portal/node_modules/
+web/portal/dist/
+
+# Packer artifacts - the golden qcow2 here is multiple GB; never ship it into a build context.
+packer/build/
+packer/output/
+*.qcow2
+*.img
+
+# Terraform / OpenTofu state and plugin caches (per-cluster, derived).
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Local env / secrets and editor cruft.
+.env
+*.pem
+*.key
+.idea/
+.vscode/
+.DS_Store

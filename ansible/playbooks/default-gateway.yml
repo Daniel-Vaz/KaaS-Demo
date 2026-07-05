@@ -1,0 +1,12 @@
+---
+# Apply the cluster's default north-south ingress: the MetalLB L2 address pool (built from the
+# reserved load_balancer_ip) and the Envoy GatewayClass + default Gateway pinned to it. Invoked by
+# internal/config/ansible.EnsureDefaultGateway with extra-var `load_balancer_ip`, once the metallb +
+# envoy-gateway add-ons are installed (the reconciler gates on that). Runs once on the first control
+# plane - these are cluster-wide objects, so for an HA control plane it must not run on every node.
+- name: Ensure the default MetalLB pool and Envoy Gateway
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  roles:
+    - default_gateway

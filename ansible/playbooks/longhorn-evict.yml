@@ -1,0 +1,106 @@
+---
+# Drain Longhorn off a disk that is being removed, BEFORE anything unmounts it.
+#
+# ORDER IS THE POINT, and it is the same shape as draining a worker before its VM is destroyed. A
+# registered disk holds volume REPLICAS. Unmounting it out from under Longhorn does not lose a volume
+# that still has a healthy replica elsewhere - but it does silently degrade every volume that had one
+# here, and for a volume whose only replica was on this disk it is data loss. Asking Longhorn to
+# evict first moves those replicas to another disk while they are still readable, and only then is
+# the filesystem ours to take away.
+#
+# Invoked by config/ansible.EvictLonghornDisks with extra-vars `evict_disks` (a list of
+# {node, disk}) and `longhorn_namespace`, from the reconciler's disk-removal path - ahead of
+# remove-node-disks.yml.
+#
+# IDEMPOTENT and SAFE TO GIVE UP ON: every step tolerates the CR, the node or the disk entry already
+# being gone (a cluster whose longhorn add-on was never installed has no CRs at all), because this
+# re-runs on each tick until the removal converges.
+- name: Evict Longhorn replicas off removed disks
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Ask Longhorn to stop scheduling onto each removed disk and evict its replicas
+      # evictionRequested is a REQUEST, not a synchronous operation: Longhorn rebuilds each replica
+      # elsewhere and drops the local one when the copy is healthy. allowScheduling false alongside it
+      # stops new replicas landing on a disk that is on its way out - without it, eviction races
+      # placement and can never finish.
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig=/etc/kubernetes/admin.conf
+          - -n
+          - "{{ longhorn_namespace }}"
+          - patch
+          - nodes.longhorn.io
+          - "{{ item.node }}"
+          - --type=merge
+          - -p
+          - '{"spec":{"disks":{"{{ item.disk }}":{"allowScheduling":false,"evictionRequested":true}}}}'
+      loop: "{{ evict_disks | default([]) }}"
+      loop_control:
+        label: "{{ item.node }}/{{ item.disk }}"
+      register: evict_requested
+      failed_when: false
+      changed_when: evict_requested.rc == 0
+
+    - name: Wait for each removed disk to hold no replicas
+      # The disk's status carries the scheduled replicas as a map; empty means Longhorn has finished
+      # moving them off. Bounded rather than infinite: a volume with nowhere to go (no other disk with
+      # room) would otherwise block the removal forever. On timeout we do NOT fail - see below.
+      ansible.builtin.shell: |
+        set -o pipefail
+        kubectl --kubeconfig /etc/kubernetes/admin.conf -n {{ longhorn_namespace }} \
+          get nodes.longhorn.io '{{ item.node }}' \
+          -o jsonpath='{.status.diskStatus.{{ item.disk }}.scheduledReplica}' 2>/dev/null || true
+      args:
+        executable: /bin/bash
+      loop: "{{ evict_disks | default([]) }}"
+      loop_control:
+        label: "{{ item.node }}/{{ item.disk }}"
+      register: evict_drained
+      until: (evict_drained.stdout | trim) in ['', '{}', 'map[]']
+      retries: 30
+      delay: 20
+      failed_when: false
+      changed_when: false
+
+    - name: Report disks that could not be drained
+      # DELIBERATELY a warning, not a failure. The user asked for this disk back and the platform has
+      # already told Longhorn to move its data; blocking the removal indefinitely would leave the
+      # cluster stuck in Updating with no way out through the API. Longhorn keeps the affected volumes
+      # marked degraded - visible, recoverable, and the honest outcome of removing storage a volume
+      # still needed. Production would refuse the removal at admission instead, by checking free
+      # capacity elsewhere in the pool first.
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: Longhorn disk {{ item.item.disk }} on {{ item.item.node }} still holds replicas
+          ({{ item.stdout | default('') | trim }}) after the eviction window - removing it anyway.
+          Volumes with a replica there will be degraded until they rebuild elsewhere.
+      loop: "{{ evict_drained.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.node }}/{{ item.item.disk }}"
+      when: (item.stdout | default('') | trim) not in ['', '{}', 'map[]']
+
+    - name: Drop each removed disk from its node's Longhorn CR
+      # Last, and only now: the CR entry is what makes Longhorn believe the path is usable storage, so
+      # it must outlive the eviction above and predate the unmount that follows in remove-node-disks.yml.
+      # A JSON-patch `remove` on the map key; tolerates the key already being absent.
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig=/etc/kubernetes/admin.conf
+          - -n
+          - "{{ longhorn_namespace }}"
+          - patch
+          - nodes.longhorn.io
+          - "{{ item.node }}"
+          - --type=json
+          - -p
+          - '[{"op":"remove","path":"/spec/disks/{{ item.disk }}"}]'
+      loop: "{{ evict_disks | default([]) }}"
+      loop_control:
+        label: "{{ item.node }}/{{ item.disk }}"
+      register: evict_dropped
+      failed_when: false
+      changed_when: evict_dropped.rc == 0

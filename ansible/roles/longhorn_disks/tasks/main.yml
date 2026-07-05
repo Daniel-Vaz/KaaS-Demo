@@ -1,0 +1,61 @@
+---
+# Register each node's EXTRA storage disks with Longhorn, by patching that node's node.longhorn.io
+# CR. Runs once on the first control plane (these objects live in the API server, not on the node
+# that owns the disk).
+#
+# WHAT IS AND IS NOT DONE HERE. Longhorn discovers its own data path - the platform's per-worker
+# storage disk is mounted exactly at defaultDataPath (/var/lib/longhorn), so longhorn-manager writes a
+# "default-disk-<hash>" entry for it with no help from us. Registering it again would be an ERROR, not
+# a no-op: Longhorn refuses two disks on one node with the same path. So this role handles ONLY the
+# additional disks a user attaches to grow a node's capacity, and the common cluster - every worker
+# with just its platform disk - never runs it at all (the reconciler skips on an empty fingerprint).
+#
+# Vars from Go (EnsureLonghornDisks): longhorn_namespace, and longhorn_nodes as a list of
+#   {node: <k8s node name>, patch: <the JSON merge patch for that node's spec.disks>}
+# The patch document is built in Go (config/ansible.longhornDiskPatch) rather than assembled here in
+# Jinja: it is a nested structure keyed by disk name, the repo uses ansible.builtin only (so there is
+# no filter plugin to lean on), and building it in Go makes it unit-testable.
+#
+# IDEMPOTENCY: a merge patch of spec.disks is additive on the map - keys we do not name are left
+# alone (including Longhorn's own default disk), and keys we do name are set to the same value every
+# run. So this converges on a first run, a re-run, and a run after a user added another disk alike.
+
+- name: Wait for the node.longhorn.io CRs to exist
+  # longhorn-manager creates one CR per node shortly after the chart installs. The reconciler already
+  # waited for the CRD to be Established and for the release's workloads (helm --wait), but the CR for
+  # a given node appears only once the manager pod lands on it - which for a freshly-scaled worker can
+  # be a moment later. Failing here would only retry the whole step a tick later; waiting is cheaper.
+  ansible.builtin.command: >-
+    kubectl --kubeconfig /etc/kubernetes/admin.conf
+    -n {{ longhorn_namespace }} get nodes.longhorn.io {{ item.node }}
+  loop: "{{ longhorn_nodes | default([]) }}"
+  loop_control:
+    label: "{{ item.node }}"
+  register: longhorn_node_cr
+  until: longhorn_node_cr.rc == 0
+  retries: 30
+  delay: 10
+  changed_when: false
+
+- name: Register the extra disks on each node
+  # allowScheduling true and evictionRequested false are set EXPLICITLY rather than left to default,
+  # because this same map is how a disk is drained on the way out (longhorn-evict.yml sets them the
+  # other way). A re-run after a cancelled removal must put the disk back into service rather than
+  # leave it quietly unschedulable.
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - --kubeconfig=/etc/kubernetes/admin.conf
+      - -n
+      - "{{ longhorn_namespace }}"
+      - patch
+      - nodes.longhorn.io
+      - "{{ item.node }}"
+      - --type=merge
+      - -p
+      - "{{ item.patch }}"
+  loop: "{{ longhorn_nodes | default([]) }}"
+  loop_control:
+    label: "{{ item.node }}"
+  register: longhorn_patched
+  changed_when: "'patched (no change)' not in (longhorn_patched.stdout | default(''))"

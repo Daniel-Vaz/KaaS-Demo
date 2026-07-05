@@ -1,0 +1,63 @@
+---
+# Make etcd/kube-scheduler/kube-controller-manager/kube-proxy scrapeable by Prometheus. Invoked by
+# internal/config/ansible.EnsureControlPlaneMetrics, only once the monitoring add-on is installed
+# (see control_plane_metrics role for why kubeadm's defaults need this).
+#
+# Two plays, deliberately not one, because the two halves need incompatible host scoping:
+#
+#   - The manifest edits (kube-scheduler/kube-controller-manager/etcd) are per-node - every control
+#     plane runs its own copies - and the etcd edit restarts that node's etcd static pod, so an HA
+#     control plane must process one node at a time (serial: 1), waiting for quorum before the next.
+#   - The kube-proxy ConfigMap is a single cluster-wide object, patched once, and needs
+#     super-admin.conf - which exists ONLY on the control plane that ran the original `kubeadm init`,
+#     never on one that joined via `kubeadm join --control-plane` (see
+#     docs/configuration-management.md). That is guaranteed to be control_plane[0].
+#
+# A single play with `run_once: true` tasks for the kube-proxy half (the previous shape here) looks
+# right but isn't: `run_once` combined with `serial` is a documented Ansible gotcha - with serial:1,
+# every host is its own batch, and run_once fires once PER BATCH, not once for the whole play. So
+# those tasks actually ran on every control plane, and failed on any that lacked super-admin.conf.
+# Two real plays, the second scoped to control_plane[0] by hosts: rather than by convention, close
+# that off structurally instead of relying on run_once to merely reduce how often it happens.
+#
+# This runs well after the node first joined, but SSH can still drop momentarily (a transient
+# network blip, sshd restarting) - the reconcile loop retries the whole step on failure, but a
+# `wait_for_connection` up front (same pattern as bootstrap.yml) rides out a short blip immediately
+# rather than burning a retry backoff.
+
+#
+# NOTE: the role tasks are pulled in with import_role + tasks_from, NOT the play-level `roles:`
+# keyword. `roles:` silently ignores tasks_from (ansible-core treats it as a role var and loads
+# tasks/main.yml, which this role doesn't have), so those plays ran ZERO tasks - the control-plane
+# scrape wiring never actually applied. import_role honours tasks_from.
+- name: Wire each control plane's own components for Prometheus scraping
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  # One member down at a time - see the note above.
+  serial: 1
+  pre_tasks:
+    - name: Wait for SSH (transient connection blips happen here too)
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: 300
+  tasks:
+    - name: Apply the per-node control-plane metrics wiring
+      ansible.builtin.import_role:
+        name: control_plane_metrics
+        tasks_from: per_node.yml
+
+- name: Wire the cluster-wide kube-proxy ConfigMap for Prometheus scraping
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  pre_tasks:
+    - name: Wait for SSH (transient connection blips happen here too)
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: 300
+  tasks:
+    - name: Patch the kube-proxy ConfigMap for scraping
+      ansible.builtin.import_role:
+        name: control_plane_metrics
+        tasks_from: kube_proxy.yml

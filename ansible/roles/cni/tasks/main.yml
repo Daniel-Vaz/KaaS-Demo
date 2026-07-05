@@ -1,0 +1,99 @@
+---
+# Install the cluster CNI (Cilium, via Helm) on the control plane using super-admin.conf, not
+# admin.conf: this runs right after `kubeadm init`, early enough that admin.conf's
+# kubeadm:cluster-admins ClusterRoleBinding can still be propagating through the RBAC authorizer's
+# cache, transiently Forbidding writes. super-admin.conf bypasses RBAC (system:masters) so it isn't
+# subject to that race - see docs/configuration-management.md.
+# Idempotent - but `helm upgrade --install` alone is NOT enough to get there: it is idempotent
+# only across *completed* attempts. A run killed mid-install (its own --timeout, or River's job
+# timeout) leaves the release in `pending-install`, and every later attempt then fails forever with
+# "another operation (install/upgrade/rollback) is in progress" - a permanent wedge no retry can
+# clear, which breaks the level-triggered loop's core promise. So the recovery tasks below run
+# first, mirroring internal/addons/helm.recoverIfStuck (the same problem, already solved there for
+# catalog add-ons). Cilium is the only supported CNI; add another by reintroducing a branch keyed
+# on a `cni` var.
+
+- name: Ensure helm is present (control plane only, for the Cilium chart)
+  ansible.builtin.shell: |
+    set -o pipefail
+    curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  args:
+    executable: /bin/bash
+    creates: /usr/local/bin/helm
+
+# --- Recover a release wedged by an interrupted Helm run (see the note above) ---------------
+# A failure here is deliberately NOT fatal: no release yet, or an unreachable API server, both
+# just mean there is nothing to recover, and the install below then surfaces the real error.
+- name: Read the Cilium release status
+  ansible.builtin.command: >
+    /usr/local/bin/helm status cilium
+    --namespace kube-system
+    --kubeconfig /etc/kubernetes/super-admin.conf
+    -o json
+  register: cilium_status
+  changed_when: false
+  failed_when: false
+
+- name: Determine whether the release is wedged in a pending state
+  ansible.builtin.set_fact:
+    cilium_release_status: >-
+      {{ (cilium_status.stdout | from_json).info.status
+         if (cilium_status.rc == 0 and (cilium_status.stdout | trim | length) > 0)
+         else '' }}
+
+# A pending-install never had a good revision to return to, so there is nothing to roll back to -
+# uninstall it and let the install below start clean.
+- name: Clear a release stuck in pending-install
+  ansible.builtin.command: >
+    /usr/local/bin/helm uninstall cilium
+    --namespace kube-system
+    --kubeconfig /etc/kubernetes/super-admin.conf
+    --wait --ignore-not-found --timeout {{ cni_timeout | default('5m') }}
+  when: cilium_release_status == 'pending-install'
+
+# A pending-upgrade/pending-rollback DOES have a last-deployed revision behind it, so return to it
+# rather than uninstalling - tearing the CNI out from under a running cluster would break every pod.
+- name: Roll back a release stuck mid-upgrade or mid-rollback
+  ansible.builtin.command: >
+    /usr/local/bin/helm rollback cilium
+    --namespace kube-system
+    --kubeconfig /etc/kubernetes/super-admin.conf
+    --wait --timeout {{ cni_timeout | default('5m') }}
+  when: cilium_release_status in ['pending-upgrade', 'pending-rollback']
+
+# When cni_service_monitors is set (re-run after the monitoring stack is up, since a
+# ServiceMonitor needs the Prometheus Operator CRD), turn on Cilium's Prometheus metrics and
+# ServiceMonitors for both the agent and the operator. Empty on the initial bootstrap install.
+- name: Compose Cilium Prometheus flags
+  ansible.builtin.set_fact:
+    cilium_prometheus_flags: >-
+      {{
+        '--set prometheus.enabled=true --set prometheus.serviceMonitor.enabled=true
+         --set operator.prometheus.enabled=true --set operator.prometheus.serviceMonitor.enabled=true'
+        if (cni_service_monitors | default(false) | bool) else ''
+      }}
+
+- name: Install Cilium via Helm
+  # ipam.mode=kubernetes makes Cilium honour the per-node PodCIDRs kubeadm allocates from
+  # --pod-network-cidr ({{ pod_cidr }}).
+  #
+  # Both tunables come from Go (internal/config/ansible.InstallCNI) rather than being fixed here:
+  #
+  #   cni_timeout - Cilium is a DaemonSet and the CNI is installed only once every worker has
+  #     joined, so `--wait` blocks until the agent is Ready on EVERY node, each pulling the image
+  #     at once. The wait therefore grows with the cluster, and a fixed 5m failed on exactly the
+  #     largest ones; the caller scales it with the desired node count.
+  #   cni_operator_replicas - the operator is a Deployment, so 1 replica is a single point of
+  #     failure that an HA control plane is supposed to not have; the caller sends 2 for HA.
+  ansible.builtin.command: >
+    /usr/local/bin/helm upgrade --install cilium cilium
+    --repo https://helm.cilium.io
+    --version {{ cni_version | default('1.19.5') }}
+    --namespace kube-system
+    --kubeconfig /etc/kubernetes/super-admin.conf
+    --set ipam.mode=kubernetes
+    --set operator.replicas={{ cni_operator_replicas | default(1) }}
+    {{ cilium_prometheus_flags }}
+    --wait --timeout {{ cni_timeout | default('5m') }}
+  register: cilium
+  changed_when: "'has been upgraded' not in cilium.stdout"

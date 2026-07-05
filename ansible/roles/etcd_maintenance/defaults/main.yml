@@ -1,0 +1,32 @@
+---
+# etcdctl talks to etcd over mTLS. These are the paths INSIDE the etcd static pod, which is where
+# every etcdctl invocation in this role runs (`kubectl exec` into it) - the same shape
+# remove-controlplane.yml uses to remove a member. kubeadm mounts the PKI at the same path in the
+# container as on the host, so these read correctly either way.
+etcd_certs: >-
+  --cacert /etc/kubernetes/pki/etcd/ca.crt
+  --cert /etc/kubernetes/pki/etcd/server.crt
+  --key /etc/kubernetes/pki/etcd/server.key
+
+kubeconfig: /etc/kubernetes/admin.conf
+
+# Fragmentation share at or above which a member is worth defragmenting. The Go policy
+# (domain.EtcdDefragPolicy) decides whether the CLUSTER is due; this is the per-member re-check that
+# makes a retried run resume instead of re-bouncing members an earlier attempt already did - the same
+# trick renew_certs plays with cert_renew_cutoff_epoch. Passed as an extra-var by
+# internal/config/ansible.DefragEtcd.
+etcd_defrag_min_ratio: 0.45
+
+# How long a single member's defragmentation may take before etcdctl gives up. Defrag is
+# stop-the-world for the member, and this is the bound on that outage.
+etcd_defrag_timeout: 90s
+
+# Backend tuning converged onto members that predate the controlplane_etcd role. Same defaults as
+# that role - see its defaults/main.yml for what they mean.
+etcd_quota_backend_bytes: 8589934592
+etcd_auto_compaction_retention: 1h
+
+# Where snapshot.yml writes the online etcd snapshot. Under /var/lib/etcd because that directory is
+# bind-mounted into the etcd static pod, so the file etcdctl writes inside the container is readable
+# by the host tasks that bundle it. Removed again at the end of the play.
+etcd_snapshot_path: /var/lib/etcd/kaas-snapshot.db

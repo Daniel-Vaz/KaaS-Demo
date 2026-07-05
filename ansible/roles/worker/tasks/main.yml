@@ -1,0 +1,37 @@
+---
+# Join a worker node to the cluster. `join_command` is passed as an extra-var by the Go
+# wrapper (captured during control-plane bootstrap). Idempotent: skipped if already joined.
+
+# Publish this node's pool membership as a kubelet node label, so workloads can be pinned to a pool
+# with a nodeSelector ({"kaas.io/nodepool": "gpu"}). `nodepool` is a per-host inventory var and
+# `pool_label` the key (both written by internal/config/ansible; the key comes from domain.PoolLabel).
+#
+# This MUST land before the join below: --node-labels is only honoured at REGISTRATION, so a node
+# that has already joined ignores it. That is the right shape here rather than a limitation - a node
+# never changes pool (its pool is baked into its VM name), and applying it at registration means the
+# label exists the instant the node first appears, with no window in which a pod could schedule onto
+# an unlabelled node. A node rebuilt during a rolling OS upgrade re-registers and re-applies it.
+#
+# kubeadm's kubelet drop-in (/usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf) sources this
+# file and passes $KUBELET_EXTRA_ARGS, which is what makes this the supported way in.
+- name: Label the kubelet with its node pool
+  ansible.builtin.copy:
+    dest: /etc/default/kubelet
+    content: "KUBELET_EXTRA_ARGS=--node-labels={{ pool_label }}={{ nodepool }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+  when: nodepool | default('') | length > 0
+
+- name: Check whether this node has already joined
+  ansible.builtin.stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: kubelet_conf
+
+- name: kubeadm join
+  # --node-name pins the k8s node name to inventory_hostname regardless of the guest OS hostname -
+  # see the matching note in roles/controlplane/tasks/main.yml.
+  ansible.builtin.command: "{{ join_command }} --node-name {{ inventory_hostname }}"
+  when: not kubelet_conf.stat.exists
+  register: join_result
+  changed_when: "'This node has joined the cluster' in join_result.stdout"

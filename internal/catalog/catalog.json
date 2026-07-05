@@ -1,0 +1,338 @@
+{
+  "os": [
+    {
+      "name": "ubuntu-26.04",
+      "family": "ubuntu",
+      "release": "26.04",
+      "status": "supported",
+      "baseImageURL": "https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-amd64.img",
+      "goldenImage": "ubuntu-26.04-k8s-1.36.2.qcow2"
+    }
+  ],
+  "kubernetes": [
+    { "version": "1.36.2", "status": "supported" }
+  ],
+  "addons": [
+    { "name": "cilium", "type": "cni", "version": "1.19.5", "status": "supported", "repo": "https://helm.cilium.io", "chart": "cilium", "description": "eBPF-based CNI providing high-performance pod networking, network policy enforcement, and load balancing." },
+    {
+      "name": "kube-prometheus-stack",
+      "description": "End-to-end cluster observability - Prometheus, Grafana, and Alertmanager wired together by the Prometheus Operator, with dashboards, recording rules, and alerts preconfigured. Powers the Monitoring page.",
+      "type": "addon",
+      "version": "87.16.1",
+      "status": "supported",
+      "repo": "https://prometheus-community.github.io/helm-charts",
+      "chart": "kube-prometheus-stack",
+      "namespace": "monitoring-system",
+      "priority": -100,
+      "timeout": "12m",
+      "establishCRDs": [
+        "servicemonitors.monitoring.coreos.com",
+        "podmonitors.monitoring.coreos.com",
+        "prometheusrules.monitoring.coreos.com",
+        "probes.monitoring.coreos.com"
+      ],
+      "values": {
+        "prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues": "false",
+        "prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues": "false",
+        "prometheus.prometheusSpec.ruleSelectorNilUsesHelmValues": "false",
+        "prometheus.prometheusSpec.probeSelectorNilUsesHelmValues": "false",
+        "prometheus.prometheusSpec.retention": "6h",
+        "prometheus.prometheusSpec.resources.requests.cpu": "100m",
+        "prometheus.prometheusSpec.resources.requests.memory": "400Mi",
+        "prometheus.prometheusSpec.routePrefix": "/api/clusters/{{.ClusterID}}/proxy/prometheus",
+        "prometheus.prometheusSpec.externalUrl": "http://localhost/api/clusters/{{.ClusterID}}/proxy/prometheus",
+        "grafana.resources.requests.cpu": "50m",
+        "grafana.resources.requests.memory": "128Mi",
+        "grafana.grafana\\.ini.server.serve_from_sub_path": "true",
+        "grafana.grafana\\.ini.server.root_url": "http://localhost/api/clusters/{{.ClusterID}}/proxy/grafana/",
+        "grafana.serviceMonitor.path": "/api/clusters/{{.ClusterID}}/proxy/grafana/metrics",
+        "grafana.grafana\\.ini.auth\\.proxy.enabled": "true",
+        "grafana.grafana\\.ini.auth\\.proxy.header_name": "X-WEBAUTH-USER",
+        "grafana.grafana\\.ini.auth\\.proxy.header_property": "username",
+        "grafana.grafana\\.ini.auth\\.proxy.auto_sign_up": "true",
+        "grafana.grafana\\.ini.auth\\.proxy.sync_ttl": "1",
+        "grafana.grafana\\.ini.auth\\.proxy.headers": "Role:X-WEBAUTH-ROLE",
+        "alertmanager.alertmanagerSpec.resources.requests.cpu": "25m",
+        "alertmanager.alertmanagerSpec.resources.requests.memory": "64Mi",
+        "alertmanager.alertmanagerSpec.routePrefix": "/api/clusters/{{.ClusterID}}/proxy/alertmanager",
+        "alertmanager.alertmanagerSpec.externalUrl": "http://localhost/api/clusters/{{.ClusterID}}/proxy/alertmanager"
+      }
+    },
+    { "name": "metrics-server", "type": "addon", "version": "3.13.1", "status": "supported", "repo": "https://kubernetes-sigs.github.io/metrics-server", "chart": "metrics-server", "description": "Cluster-wide resource metrics (CPU/memory) that power `kubectl top` and the Horizontal Pod Autoscaler.", "values": { "args[0]": "--kubelet-insecure-tls", "metrics.enabled": "true", "serviceMonitor.enabled": "true" } },
+    {
+      "name": "trivy-operator",
+      "description": "Continuously scans in-cluster workloads and images for vulnerabilities, misconfigurations, exposed secrets, and RBAC risks, writing findings back as CRDs. Powers the Security page.",
+      "type": "addon",
+      "version": "0.34.0",
+      "status": "supported",
+      "repo": "https://aquasecurity.github.io/helm-charts",
+      "chart": "trivy-operator",
+      "namespace": "trivy-system",
+      "timeout": "8m",
+      "values": {
+        "trivy.ignoreUnfixed": "false",
+        "trivy.resources.requests.cpu": "50m",
+        "trivy.resources.requests.memory": "100Mi",
+        "trivy.resources.limits.cpu": "500m",
+        "trivy.resources.limits.memory": "500Mi",
+        "operator.scannerReportTTL": "24h",
+        "operator.scanJobsConcurrentLimit": "1",
+        "nodeCollector.tolerations[0].operator": "Exists",
+        "serviceMonitor.enabled": "true"
+      }
+    },
+    {
+      "name": "metallb",
+      "description": "Bare-metal load balancer that assigns external IPs to LoadBalancer Services from a configured address pool. Installed by default; the platform reserves one node-network address as its default L2 (ARP) pool, from which the default Envoy Gateway draws its external IP.",
+      "type": "addon",
+      "version": "0.16.1",
+      "status": "supported",
+      "repo": "https://metallb.github.io/metallb",
+      "chart": "metallb",
+      "namespace": "metallb-system",
+      "priority": -10,
+      "establishCRDs": [
+        "ipaddresspools.metallb.io",
+        "l2advertisements.metallb.io"
+      ],
+      "values": {
+        "prometheus.serviceMonitor.enabled": "true",
+        "prometheus.serviceAccount": "kube-prometheus-stack-prometheus",
+        "prometheus.namespace": "monitoring-system"
+      }
+    },
+    {
+      "name": "envoy-gateway",
+      "description": "Kubernetes Gateway API implementation built on Envoy Proxy for managing ingress and L7 traffic routing. Installed by default as the cluster's Gateway API; the platform provisions its GatewayClass and a default Gateway on the reserved MetalLB address.",
+      "type": "addon",
+      "version": "v1.8.2",
+      "status": "supported",
+      "repo": "",
+      "chart": "oci://docker.io/envoyproxy/gateway-helm",
+      "namespace": "envoy-gateway-system",
+      "priority": -5,
+      "timeout": "8m",
+      "establishCRDs": [
+        "gatewayclasses.gateway.networking.k8s.io",
+        "gateways.gateway.networking.k8s.io"
+      ]
+    },
+    {
+      "name": "argocd",
+      "description": "Declarative GitOps continuous delivery - syncs cluster state from Git repositories and continuously reconciles drift.",
+      "type": "addon",
+      "version": "10.1.3",
+      "status": "supported",
+      "repo": "https://argoproj.github.io/argo-helm",
+      "chart": "argo-cd",
+      "namespace": "argocd-system",
+      "timeout": "8m",
+      "values": {
+        "dex.enabled": "false"
+      }
+    },
+    {
+      "name": "flux",
+      "description": "GitOps toolkit - a set of controllers that continuously reconcile the cluster from Git repositories, OCI artifacts and Helm charts.",
+      "type": "addon",
+      "version": "2.19.0",
+      "status": "supported",
+      "repo": "https://fluxcd-community.github.io/helm-charts",
+      "chart": "flux2",
+      "namespace": "flux-system",
+      "timeout": "8m"
+    },
+    {
+      "name": "kyverno",
+      "description": "Kubernetes-native policy engine that validates, mutates, and generates resources to enforce security and governance rules.",
+      "type": "addon",
+      "version": "3.8.2",
+      "status": "supported",
+      "repo": "https://kyverno.github.io/kyverno",
+      "chart": "kyverno",
+      "namespace": "kyverno-system",
+      "timeout": "8m",
+      "values": {
+        "admissionController.replicas": "1",
+        "backgroundController.replicas": "1",
+        "cleanupController.replicas": "1",
+        "reportsController.replicas": "1"
+      }
+    },
+    {
+      "name": "harbor",
+      "description": "Private container registry with built-in vulnerability scanning, image signing, and role-based access control.",
+      "type": "addon",
+      "version": "1.19.1",
+      "status": "supported",
+      "repo": "https://helm.goharbor.io",
+      "chart": "harbor",
+      "namespace": "harbor-system",
+      "timeout": "10m",
+      "values": {
+        "expose.type": "clusterIP",
+        "expose.tls.enabled": "false",
+        "externalURL": "http://harbor.local",
+        "harborAdminPassword": "Harbor12345",
+        "persistence.enabled": "false"
+      }
+    },
+    {
+      "name": "opencost",
+      "description": "Real-time cost monitoring and allocation for Kubernetes workloads, broken down by namespace, workload, and label.",
+      "type": "addon",
+      "version": "2.5.26",
+      "status": "supported",
+      "repo": "https://opencost.github.io/opencost-helm-chart",
+      "chart": "opencost",
+      "namespace": "opencost-system",
+      "values": {
+        "opencost.prometheus.internal.serviceName": "kube-prometheus-stack-prometheus",
+        "opencost.prometheus.internal.namespaceName": "monitoring-system",
+        "opencost.prometheus.internal.port": "9090"
+      }
+    },
+    {
+      "name": "kepler",
+      "description": "Uses eBPF and ML models to estimate per-pod energy consumption and export it as Prometheus metrics for sustainability reporting.",
+      "type": "addon",
+      "version": "0.6.1",
+      "status": "supported",
+      "repo": "https://sustainable-computing-io.github.io/kepler-helm-chart",
+      "chart": "kepler",
+      "namespace": "kepler-system",
+      "values": {
+        "serviceMonitor.enabled": "true"
+      }
+    },
+    {
+      "name": "external-secrets",
+      "description": "Syncs secrets from HashiCorp Vault into native Kubernetes Secrets. Installed by default and wired to the platform's central Vault: the control plane provisions a per-cluster JWT auth role and a ClusterSecretStore, so an ExternalSecret referencing kaas/clusters/<id>/<namespace>/<name> materializes as a real Secret - with no static Vault credential in the cluster. Powers the Secrets page's 'View in Vault' link.",
+      "type": "addon",
+      "version": "2.7.0",
+      "status": "supported",
+      "repo": "https://charts.external-secrets.io",
+      "chart": "external-secrets",
+      "namespace": "externalsecrets-system",
+      "priority": -3,
+      "timeout": "8m",
+      "establishCRDs": [
+        "clustersecretstores.external-secrets.io",
+        "externalsecrets.external-secrets.io"
+      ],
+      "values": {
+        "installCRDs": "true",
+        "serviceMonitor.enabled": "true"
+      }
+    },
+    {
+      "name": "keycloak",
+      "description": "Open-source identity and access management providing OIDC/SAML single sign-on for cluster and application services.",
+      "type": "addon",
+      "version": "7.2.2",
+      "status": "supported",
+      "repo": "https://codecentric.github.io/helm-charts",
+      "chart": "keycloakx",
+      "namespace": "keycloak-system",
+      "timeout": "8m",
+      "values": {
+        "command[0]": "/opt/keycloak/bin/kc.sh",
+        "command[1]": "start-dev",
+        "command[2]": "--health-enabled=true",
+        "dbchecker.enabled": "false"
+      }
+    },
+    {
+      "name": "cert-manager",
+      "description": "Automates issuance and renewal of TLS certificates from Let's Encrypt, Vault, and other issuers. Installed by default; the platform provisions a self-signed ClusterIssuer and, when cluster DNS is configured, a wildcard certificate that terminates HTTPS on the default Envoy Gateway - so every route exposed under the cluster's apps domain is TLS-ready with nothing to configure.",
+      "type": "addon",
+      "version": "1.21.0",
+      "status": "supported",
+      "repo": "https://charts.jetstack.io",
+      "chart": "cert-manager",
+      "namespace": "certmanager-system",
+      "priority": -8,
+      "establishCRDs": [
+        "clusterissuers.cert-manager.io",
+        "certificates.cert-manager.io"
+      ],
+      "values": {
+        "crds.enabled": "true",
+        "prometheus.enabled": "true",
+        "prometheus.servicemonitor.enabled": "true"
+      }
+    },
+    {
+      "name": "external-dns",
+      "description": "Publishes DNS records for the Services, Ingresses and HTTPRoutes deployed in this cluster, into the platform's own DNS under the cluster's domain. Installed by default; the platform points it at the site's DNS servers and confines it to <cluster>.<base domain>.",
+      "type": "addon",
+      "version": "1.21.1",
+      "status": "supported",
+      "repo": "https://kubernetes-sigs.github.io/external-dns/",
+      "chart": "external-dns",
+      "namespace": "externaldns-system",
+      "values": {
+        "provider.name": "inmemory",
+        "policy": "sync",
+        "registry": "txt",
+        "txtOwnerId": "kaas-{{.ClusterID}}",
+        "txtPrefix": "kaas-",
+        "serviceMonitor.enabled": "true"
+      }
+    },
+    {
+      "name": "longhorn",
+      "description": "Cloud-native distributed block storage - the cluster's default StorageClass. Installed by default: every worker is born with an extra disk mounted at /var/lib/longhorn, which Longhorn registers as that node's storage, so a plain PersistentVolumeClaim gets a real replicated volume with nothing to configure. Attach more disks to a node to grow its share of the pool.",
+      "type": "addon",
+      "version": "1.12.0",
+      "status": "supported",
+      "repo": "https://charts.longhorn.io",
+      "chart": "longhorn",
+      "namespace": "longhorn-system",
+      "timeout": "12m",
+      "establishCRDs": [
+        "nodes.longhorn.io",
+        "volumes.longhorn.io"
+      ],
+      "values": {
+        "persistence.defaultClass": "true",
+        "persistence.defaultFsType": "ext4",
+        "defaultSettings.defaultDataPath": "/var/lib/longhorn",
+        "defaultSettings.createDefaultDiskLabeledNodes": "false",
+        "defaultSettings.storageMinimalAvailablePercentage": "10",
+        "defaultSettings.deletingConfirmationFlag": "true",
+        "preUpgradeChecker.jobEnabled": "false",
+        "longhornUI.replicas": "1"
+      }
+    },
+    {
+      "name": "openebs",
+      "description": "Container-attached storage for Kubernetes - dynamically provisions LocalPV hostpath volumes backed by each node's own disk.",
+      "type": "addon",
+      "version": "4.5.1",
+      "status": "supported",
+      "repo": "https://openebs.github.io/openebs",
+      "chart": "openebs",
+      "namespace": "openebs-system",
+      "timeout": "8m",
+      "values": {
+        "engines.local.lvm.enabled": "false",
+        "engines.local.zfs.enabled": "false",
+        "engines.replicated.mayastor.enabled": "false",
+        "loki.enabled": "false",
+        "alloy.enabled": "false"
+      }
+    }
+  ],
+  "bundles": [
+    {
+      "name": "2026.1",
+      "status": "supported",
+      "os": "ubuntu-26.04",
+      "kubernetes": "1.36.2",
+      "cni": "cilium",
+      "addons": { "cilium": "1.19.5", "kube-prometheus-stack": "87.16.1", "metrics-server": "3.13.1", "trivy-operator": "0.34.0", "metallb": "0.16.1", "envoy-gateway": "v1.8.2", "external-dns": "1.21.1", "cert-manager": "1.21.0", "longhorn": "1.12.0", "external-secrets": "2.7.0" },
+      "supersedes": ""
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+---
+# Read the cluster's service-account token issuer and public signing keys, and hand them back to the
+# controller. Invoked by internal/config/ansible.ClusterOIDC with extra-var artifacts_dir. Read-only:
+# it queries the API server's OIDC discovery endpoints and writes nothing to the cluster.
+#
+# The platform uses these to configure Vault's per-cluster JWT auth to validate the External Secrets
+# Operator's ServiceAccount token OFFLINE (jwt_validation_pubkeys + bound_issuer), so Vault never has
+# to reach the cluster. The Go side converts the JWKS to PEM (see jwksToPEM).
+#
+# One play on ONE control plane - these are cluster-wide discovery documents, identical on every
+# API server.
+- name: Read the cluster's OIDC issuer and JWKS
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Fetch the OIDC discovery document
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/admin.conf get --raw /.well-known/openid-configuration
+      register: oidc_config
+      changed_when: false
+
+    - name: Fetch the JWKS (service-account token signing keys)
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/admin.conf get --raw /openid/v1/jwks
+      register: oidc_jwks
+      changed_when: false
+
+    - name: Ensure the artifacts dir exists on the controller
+      ansible.builtin.file:
+        path: "{{ artifacts_dir }}"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      become: false
+
+    - name: Save the OIDC discovery document to the controller
+      ansible.builtin.copy:
+        content: "{{ oidc_config.stdout }}\n"
+        dest: "{{ artifacts_dir }}/oidc.json"
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+
+    - name: Save the JWKS to the controller
+      ansible.builtin.copy:
+        content: "{{ oidc_jwks.stdout }}\n"
+        dest: "{{ artifacts_dir }}/jwks.json"
+        mode: '0600'
+      delegate_to: localhost
+      become: false

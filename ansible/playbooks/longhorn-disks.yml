@@ -1,0 +1,14 @@
+---
+# Register the cluster's extra storage disks with Longhorn (see the longhorn_disks role). Invoked by
+# config/ansible.EnsureLonghornDisks from reconcileStorageWiring, once the longhorn add-on is
+# installed and at least one node carries an attached disk BEYOND its platform one - the platform's
+# own disk sits at Longhorn's default data path and registers itself.
+#
+# Runs on the first control plane: node.longhorn.io CRs are cluster-scoped objects reached through
+# the API server, so for an HA control plane this must not run once per node.
+- name: Register extra node disks with Longhorn
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  roles:
+    - longhorn_disks

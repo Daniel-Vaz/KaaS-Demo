@@ -1,0 +1,108 @@
+# Directory authentication (KAAS_AUTH=ldap). See docs/running.md and internal/authn/ldap.
+#
+# This file is MOUNTED into the api container at /etc/kaas/ldap.yaml (compose mounts this example by
+# default, so `make up` works whether or not you use directory auth - KAAS_AUTH=local ignores it
+# entirely). To use a real one without editing a tracked file:
+#
+#   cp deploy/ldap.example.yaml deploy/ldap.yaml   # gitignored
+#   # in deploy/.env:
+#   KAAS_AUTH=ldap
+#   KAAS_LDAP_CONFIG_HOST=./ldap.yaml
+#   KAAS_LDAP_BIND_PASSWORD=...
+#
+# Try it with NO domain controller at all - this validates the rules below and synthesizes one user
+# per rule (ad-<group_key>-<role>, plus ad-everyone and ad-nobody; password "demo"):
+#
+#   KAAS_AUTH=ldap KAAS_LDAP=fake make up-fake
+#
+# The worker never sees any of this: it does not authenticate users, so the bind password stays out
+# of the one container that holds the libvirt socket and every tenant's secrets.
+
+# The domain controllers, tried IN ORDER - the second is a failover, not a load-balanced peer.
+urls:
+  - ldap://1.1.1.1
+
+# A simple bind sends the password in the clear, so plaintext ldap:// is refused unless you either
+# upgrade the connection (this, the default) or explicitly acknowledge the risk with `insecure:
+# true`. StartTLS happens BEFORE the bind.
+start_tls: true
+# Internal AD certificates are usually issued by an internal CA the container doesn't trust. Point
+# at its PEM bundle (mount it alongside this file) rather than reaching for insecure_skip_verify -
+# skipping verification makes the TLS pointless against exactly the attacker TLS is for.
+ca_file: ""
+insecure_skip_verify: false
+
+# The service account that searches the directory. It needs read access to the user subtree and
+# nothing else - no write, no admin. The PASSWORD IS NOT HERE: it comes from the environment, so
+# this file stays mountable as a plain ConfigMap.
+bind_dn: "CN=svc-kaas,OU=Service Accounts,DC=example,DC=lab"
+bind_password_env: KAAS_LDAP_BIND_PASSWORD
+
+# Where users live. Narrowing this from the domain root to an OU is the cheapest way to say
+# "only these people may log in at all" - anyone outside the subtree simply isn't found.
+user_base_dn: "DC=example,DC=lab"
+
+# How a typed login resolves to exactly one entry. Exactly one %s, replaced with the escaped login.
+#
+#   sAMAccountName  -> users log in as "dvaz"                    (the default below)
+#   userPrincipalName -> users log in as "dvaz@example.lab"
+#
+# Add (!(userAccountControl:1.2.840.113556.1.4.803:=2)) to exclude disabled accounts - worth doing,
+# since nothing else here re-checks a session against the directory once it is issued.
+user_filter: "(&(objectClass=user)(objectCategory=person)(sAMAccountName=%s))"
+
+# The attribute whose value becomes the portal username (lowercased). Taken from the DIRECTORY, not
+# from what was typed, so "DVaz", "dvaz" and a UPN all converge on one account.
+username_attr: sAMAccountName
+display_name_attr: displayName
+email_attr: mail
+
+timeout: 10s
+
+# ---------------------------------------------------------------------------------------------
+# Mapping rules: who lands in which portal group, with which role.
+#
+# Each rule's `filter` is a RAW LDAP FILTER evaluated against the authenticating user's own entry.
+# That is where the generality is - anything the directory can express works:
+#
+#   (memberOf=CN=X,OU=Groups,DC=example,DC=lab)                direct group membership
+#   (memberOf:1.2.840.113556.1.4.1941:=CN=X,OU=Groups,DC=...)        nested groups (AD evaluates it)
+#   (department=Engineering)                                          any attribute
+#   (&(department=Eng)(!(title=Contractor)))                          composed
+#   (|(memberOf=CN=A,...)(memberOf=CN=B,...))                         either of two groups
+#
+# `role` is read | write and nothing else - a directory rule cannot grant platform admin. That stays
+# a local, seed-only flag (see internal/domain.User.IsAdmin for why).
+#
+# `group_key` is the group's stable identity; it defaults to a slug of `group`. Set it explicitly to
+# relabel a group without losing it, or - as in Engineering below - to point SEVERAL rules at ONE
+# group. Users matching any of a group's rules are group-mates and share cluster access; a user
+# matching more than one gets the strongest role.
+#
+# A user who matches no rule can still log in - they just have no group, and own only their own
+# clusters. An empty `mappings:` list is a valid config meaning exactly that.
+mappings:
+  # Platform team: full management of each other's clusters.
+  - group: "Platform"
+    group_key: platform
+    role: write
+    filter: "(memberOf:1.2.840.113556.1.4.1941:=CN=K8s-Platform,OU=Groups,DC=example,DC=lab)"
+
+  # Engineering: ONE team, where a subset may write. Both rules share group_key, so everyone here
+  # can see each other's clusters - but only K8s-Eng-Admins can change them. Splitting these into
+  # two group_keys would make them two unrelated groups that cannot see each other at all.
+  - group: "Engineering"
+    group_key: engineering
+    role: read
+    filter: "(memberOf:1.2.840.113556.1.4.1941:=CN=K8s-Eng,OU=Groups,DC=example,DC=lab)"
+  - group: "Engineering"
+    group_key: engineering
+    role: write
+    filter: "(memberOf:1.2.840.113556.1.4.1941:=CN=K8s-Eng-Admins,OU=Groups,DC=example,DC=lab)"
+
+  # Mapping on a plain attribute rather than a group, for a directory that doesn't model K8s access
+  # as groups at all.
+  - group: "Support"
+    group_key: support
+    role: read
+    filter: "(department=Support)"

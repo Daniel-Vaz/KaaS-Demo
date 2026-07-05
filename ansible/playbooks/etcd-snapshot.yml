@@ -1,0 +1,28 @@
+---
+# Take a periodic control-plane backup: an ONLINE etcd snapshot plus the cluster PKI and kubelet
+# state, bundled and fetched to the controller, which seals it and stores it (see
+# internal/config/ansible.SnapshotEtcd and internal/reconcile PhaseSnapshottingEtcd).
+#
+# This is what makes a dead SOLE control plane recoverable. The rolling-replacement path already
+# copies a control plane's state off it (backup-controlplane.yml), but only while it is still alive -
+# the assumption that fails precisely when the node is the thing that broke.
+#
+# One play on ONE control plane. On HA the snapshot is the same keyspace whichever member serves it,
+# and the PKI is identical across members (kubeadm gives every stacked control plane the full set),
+# so there is nothing to gain from asking more than one.
+#
+# Non-disruptive throughout: nothing is stopped and nothing is moved, which is what lets this run on
+# a cadence against every healthy cluster on the platform. Contrast backup-controlplane.yml, which
+# quiesces etcd and is correct only because the node it runs on is about to be destroyed.
+#
+# import_role + tasks_from rather than the play-level `roles:` keyword - that silently ignores
+# tasks_from and would load tasks/main.yml, which this role does not have (see etcd-status.yml).
+- name: Take a control-plane backup
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Snapshot etcd and archive the control-plane state
+      ansible.builtin.import_role:
+        name: etcd_maintenance
+        tasks_from: snapshot.yml

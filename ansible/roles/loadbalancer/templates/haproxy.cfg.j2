@@ -1,0 +1,25 @@
+#jinja2: trim_blocks: True, lstrip_blocks: True
+# Managed by KaaS-Demo (ansible loadbalancer role). TCP passthrough to the kube-apiservers;
+# TLS terminates at the apiservers, not here. Frontend :8443 == control_plane_endpoint port.
+global
+    log /dev/log local0
+    maxconn 4000
+
+defaults
+    log     global
+    mode    tcp
+    option  dontlognull
+    timeout connect 5s
+    timeout client  30s
+    timeout server  30s
+
+frontend kube-apiserver
+    bind *:8443
+    default_backend kube-apiservers
+
+backend kube-apiservers
+    balance     roundrobin
+    option      tcp-check
+    {% for host in groups['control_plane'] %}
+    server {{ host }} {{ hostvars[host].ansible_host | default(hostvars[host].ansible_default_ipv4.address) }}:6443 check
+    {% endfor %}

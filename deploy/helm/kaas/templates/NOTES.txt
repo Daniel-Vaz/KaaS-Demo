@@ -1,0 +1,43 @@
+{{ .Chart.Name }} {{ .Chart.AppVersion }} is installed as "{{ .Release.Name }}" in namespace {{ .Release.Namespace }}.
+
+Portal:
+{{- if .Values.ingress.enabled }}
+  http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "kaas.fullname" . }}-web 8080:80
+  → http://localhost:8080   (the raw JSON+SSE API: port-forward svc/{{ include "kaas.fullname" . }}-api 8081:8080)
+{{- end }}
+
+Sign in as {{ .Values.config.adminUsername }} / (config.adminPassword).
+
+Replicas - every tier scales; only Postgres is single (see docs/architecture.md#horizontal-scaling):
+  web {{ .Values.web.replicaCount }} · api {{ .Values.api.replicaCount }} · worker {{ .Values.worker.replicaCount }} · shell {{ .Values.shell.replicaCount }}{{ if eq .Values.kvm.mode "remote" }} · socks tunnel {{ .Values.kvm.socks.tunnel.replicaCount }}{{ end }}
+
+  kubectl -n {{ .Release.Namespace }} scale deploy/{{ include "kaas.fullname" . }}-api --replicas=5
+  # or: helm upgrade ... --set api.replicaCount=5
+
+Exactly one worker holds the leader lease at a time (it runs the orphan-GC / metrics / health
+sweeps); the others stand by and take over within seconds if it dies. To see who leads:
+
+  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/component=worker | grep leader
+
+{{- if eq .Values.kvm.mode "remote" }}
+{{- if not .Values.kvm.host }}
+
+WARNING: kvm.mode=remote but kvm.host is empty - the worker has no hypervisor to provision on.
+Set kvm.host, kvm.ssh.privateKey, and config.clusterSSH.{publicKey,privateKey}.
+{{- end }}
+{{- else }}
+
+kvm.mode=local: the worker and shell pods take the host network and mount the node's libvirt socket,
+so they are pinned to the node(s) matching kvm.local.nodeSelector, and the shell is capped at one
+pod per such node. Use kvm.mode=remote for anything beyond a single-node/dev cluster.
+{{- end }}
+{{- if not .Values.config.clusterSSH.publicKey }}
+
+WARNING: config.clusterSSH.publicKey is empty - the worker cannot provision VMs it can log in to.
+{{- end }}
+{{- if and .Values.postgres.enabled (eq .Values.postgres.auth.password "kaas") }}
+
+WARNING: the bundled Postgres is using the default password. Fine for a demo, not for anything else.
+{{- end }}

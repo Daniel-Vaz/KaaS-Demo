@@ -1,0 +1,35 @@
+---
+# Resolve THIS host's etcd pod name into `etcd_pod`. Shared by status.yml and defrag.yml, which both
+# need to `kubectl exec` into the local member.
+#
+# Selected by node rather than by index: `-l component=etcd` alone returns every control plane's pod
+# and `.items[0]` is whichever the apiserver listed first, which on HA is not necessarily this host.
+# Every play here reasons about ONE SPECIFIC member, so picking the wrong pod would defragment (or
+# report on) a different node than the one the play is serialized over - silently breaking the
+# one-member-at-a-time guarantee that keeps quorum.
+#
+# The node name is inventory_hostname because every kubeadm init/join passes
+# `--node-name {{ inventory_hostname }}` (see docs/configuration-management.md - load-bearing on
+# Proxmox, where the guest hostname differs from the platform's VM name).
+#
+# Retried: on an HA cluster this can run moments after a peer's etcd was bounced, and `kubectl` to a
+# still-settling apiserver hits transient TLS handshake timeouts - the same reason
+# remove-controlplane.yml retries every step.
+
+- name: Find this node's etcd pod
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    kubectl --kubeconfig {{ kubeconfig }} -n kube-system get pods
+    -l component=etcd --field-selector spec.nodeName={{ inventory_hostname }}
+    -o jsonpath='{.items[0].metadata.name}'
+  args:
+    executable: /bin/bash
+  register: etcd_pod_lookup
+  until: etcd_pod_lookup.rc == 0 and (etcd_pod_lookup.stdout | trim | length) > 0
+  retries: 30
+  delay: 5
+  changed_when: false
+
+- name: Remember this node's etcd pod
+  ansible.builtin.set_fact:
+    etcd_pod: "{{ etcd_pod_lookup.stdout | trim }}"

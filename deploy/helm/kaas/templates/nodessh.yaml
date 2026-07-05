@@ -1,0 +1,218 @@
+{{- if eq (include "kaas.real" .) "true" }}
+{{- $fullname := include "kaas.fullname" . -}}
+{{- $remote := eq .Values.kvm.mode "remote" -}}
+{{/*
+The node-ssh sandbox: the isolated environment a user's per-node SSH session (Nodes tab → SSH) runs
+in. It is the deliberate INVERSE of the shell sandbox (shell.yaml), and the contrast is the whole
+reason it is a separate Deployment:
+
+  * The shell sandbox is safe because it holds NO secret - a kubectl-into-bash escape finds nothing.
+  * This sandbox necessarily holds the CLUSTER-VM SSH key (mounted at /keys/id) - you cannot ssh to
+    a node without it - plus, for a remote hypervisor, the bastion key too. So "no secrets here" is
+    off the table. It is made safe the other way: the IMAGE carries no shell and no kubectl
+    (deploy/Containerfile.nodessh), and the agent's only ever action is to exec `ssh` to a
+    caller-named node IP. There is no session from which to read the key it holds.
+
+Networking matches shell.yaml: LOCAL KVM → hostNetwork (the VMs are on the node) and one pod per node
+(each binds :8084); REMOTE KVM → ordinary pod networking, because the session reaches the VM by
+ssh'ing to the hypervisor as a bastion (a routable address), exactly as Ansible does.
+
+Production would not mount a fleet-wide key here at all: an SSH CA minting a short-lived, single-node
+certificate per session (see internal/nodessh).
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-nodessh
+  labels:
+    {{- include "kaas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nodessh
+spec:
+  {{- if not .Values.nodessh.autoscaling.enabled }}
+  replicas: {{ .Values.nodessh.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "kaas.selectorLabels" (dict "ctx" . "component" "nodessh") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kaas.labels" . | nindent 8 }}
+        app.kubernetes.io/component: nodessh
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if not $remote }}
+      # local mode: the cluster VMs are on the node, so the agent needs the node's network to reach
+      # them. Each pod then binds :8084 on its node - hence one pod per node (anti-affinity below).
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
+      # Let an open SSH session drain rather than being cut mid-keystroke.
+      terminationGracePeriodSeconds: 60
+      # Runs as ROOT, unlike the shell sandbox - a hard requirement of holding the key, not a
+      # relaxation. ssh refuses a group/other-readable private key ("too open"), so the mounted
+      # Secret stays 0400; a Secret file is root-owned, so only uid 0 can read it. Containment here
+      # is the absence of a shell session (the agent only ever execs ssh) plus the container
+      # hardening below - not the uid. See deploy/Containerfile.nodessh.
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+      containers:
+        - name: node-ssh-agent
+          image: {{ include "kaas.image" (dict "ctx" . "component" "nodessh") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: agent
+              containerPort: 8084
+          env:
+            - name: KAAS_NODE_SSH_LISTEN
+              value: ":8084"
+            - name: KAAS_WORK_DIR
+              value: /work
+            # The API↔node-ssh bearer token - its own secret, distinct from kaas-shell-token.
+            - name: KAAS_NODE_SSH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kaas.secretName" . }}
+                  key: kaas-node-ssh-token
+            # The cluster-VM key cloud-init injected - the SAME key the worker uses for Ansible. The
+            # login user defaults to kaas (KAAS_SSH_USER), left unset here exactly as the worker does.
+            - name: KAAS_SSH_PRIVATE_KEY_FILE
+              value: /keys/id
+            {{- if $remote }}
+            # Remote hypervisor: the final hop to the VM is chained through it as a bastion (a
+            # ProxyCommand built from these, exactly as Ansible's). The key below is the PLATFORM's key
+            # to the hypervisor, mounted from the same secret the worker uses - NOT the cluster-VM key.
+            - name: KAAS_KVM_HOST
+              value: {{ .Values.kvm.host | quote }}
+            - name: KAAS_KVM_SSH_USER
+              value: {{ .Values.kvm.sshUser | quote }}
+            - name: KAAS_KVM_SSH_PORT
+              value: {{ .Values.kvm.sshPort | quote }}
+            - name: KAAS_KVM_SSH_KEY_FILE
+              value: /keys/kvm
+            {{- if .Values.kvm.ssh.knownHosts }}
+            - name: KAAS_KVM_KNOWN_HOSTS_FILE
+              value: /keys/kvm_known_hosts
+            {{- end }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.nodessh.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            # Per-session scratch (a private, empty HOME) - the only writable path.
+            - name: work
+              mountPath: /work
+            # The SSH key(s) - the one thing that sets this sandbox apart from the shell one.
+            - name: keys
+              mountPath: /keys
+              readOnly: true
+      volumes:
+        - name: work
+          emptyDir:
+            sizeLimit: {{ .Values.nodessh.workDirSizeLimit }}
+        - name: keys
+          secret:
+            secretName: {{ include "kaas.secretName" . }}
+            defaultMode: 0400
+            items:
+              - key: cluster-ssh-private-key
+                path: id
+              {{- if $remote }}
+              - key: kvm-ssh-private-key
+                path: kvm
+              {{- if .Values.kvm.ssh.knownHosts }}
+              - key: kvm-known-hosts
+                path: kvm_known_hosts
+              {{- end }}
+              {{- end }}
+      {{- if $remote }}
+      {{- with .Values.nodessh.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodessh.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodessh.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- else }}
+      nodeSelector:
+        {{- toYaml .Values.kvm.local.nodeSelector | nindent 8 }}
+      {{- with .Values.kvm.local.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # host-networked pods all want :8084 on their node, so at most one per node. Caps the replica
+      # count at the number of libvirt nodes - the price of local mode, same as the shell sandbox.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "kaas.selectorLabels" (dict "ctx" . "component" "nodessh") | nindent 18 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-nodessh
+  labels:
+    {{- include "kaas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nodessh
+spec:
+  type: ClusterIP
+  ports:
+    - name: agent
+      port: 8084
+      targetPort: agent
+  selector:
+    {{- include "kaas.selectorLabels" (dict "ctx" . "component" "nodessh") | nindent 4 }}
+{{- if .Values.nodessh.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $fullname }}-nodessh
+  labels:
+    {{- include "kaas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nodessh
+spec:
+  minAvailable: {{ .Values.nodessh.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "kaas.selectorLabels" (dict "ctx" . "component" "nodessh") | nindent 6 }}
+{{- end }}
+{{- if .Values.nodessh.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $fullname }}-nodessh
+  labels:
+    {{- include "kaas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nodessh
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $fullname }}-nodessh
+  minReplicas: {{ .Values.nodessh.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.nodessh.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.nodessh.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}
