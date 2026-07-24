@@ -1,0 +1,113 @@
+# CI gate: everything `make build test vet`, `make helm-lint`, the OpenTofu `validate` and the
+# Ansible `--syntax-check` do locally, run on every push to main and every PR. Each language/tool
+# gets its own job so failures are isolated and the checks run in parallel. Nothing here needs a
+# hypervisor, a database or secrets - it is the fake/offline half of the build.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch/PR supersedes an in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go (build · vet · test · fmt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod # keep the toolchain pinned to go.mod (currently 1.26)
+          cache: true
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt-clean:"; echo "$unformatted"
+            exit 1
+          fi
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+
+  web:
+    name: Portal (type-check · build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web/portal
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/portal/package-lock.json
+      - run: npm ci
+      # `npm run build` is `tsc --noEmit && vite build` - type-check then bundle.
+      - run: npm run build
+
+  helm:
+    name: Helm chart (lint · template)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      # Mirrors `make helm-lint`, but vendors the Vault subchart first (there is no Chart.lock in
+      # the tree, so `dependency update` pulls it) - `helm template` fails without it.
+      - name: Lint and render the chart in every mode
+        run: |
+          helm dependency update deploy/helm/kaas
+          helm lint deploy/helm/kaas
+          helm template kaas deploy/helm/kaas --set providers=fake >/dev/null
+          helm template kaas deploy/helm/kaas --set kvm.host=10.0.0.1 --set config.clusterSSH.publicKey=x >/dev/null
+          helm template kaas deploy/helm/kaas --set kvm.mode=local --set config.clusterSSH.publicKey=x >/dev/null
+
+  tofu:
+    name: OpenTofu (fmt · validate)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [libvirt, vsphere, proxmox]
+    defaults:
+      run:
+        working-directory: infra/${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: opentofu/setup-opentofu@v1
+      - run: tofu fmt -check -recursive
+      # -backend=false: validate the module offline, no state backend or provider credentials.
+      - run: tofu init -backend=false
+      - run: tofu validate
+
+  ansible:
+    name: Ansible (syntax-check)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ansible
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      # Only ansible.builtin is used, so ansible-core alone is enough - no extra collections.
+      - run: pip install ansible-core
+      - name: Syntax-check every playbook
+        run: |
+          rc=0
+          for pb in playbooks/*.yml; do
+            echo "== $pb =="
+            ansible-playbook --syntax-check "$pb" || rc=1
+          done
+          exit $rc
