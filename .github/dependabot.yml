@@ -1,0 +1,45 @@
+version: 2
+updates:
+  # Go module (cmd/, internal/, ...)
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Web portal (React + TypeScript + Vite)
+  - package-ecosystem: "npm"
+    directory: "/web/portal"
+    schedule:
+      interval: "weekly"
+
+  # OpenTofu provider version constraints.
+  - package-ecosystem: "terraform"
+    directory: "/infra/libvirt"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "terraform"
+    directory: "/infra/vsphere"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "terraform"
+    directory: "/infra/proxmox"
+    schedule:
+      interval: "weekly"
+
+  # Base images in the images this repo builds (deploy/Containerfile.*).
+  - package-ecosystem: "docker"
+    directory: "/deploy"
+    schedule:
+      interval: "weekly"
+
+  # Container base images pinned in deploy/compose*.yaml.
+  - package-ecosystem: "docker-compose"
+    directory: "/deploy"
+    schedule:
+      interval: "weekly"
+
+  # GitHub Actions workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
