@@ -24,6 +24,7 @@ It runs on **libvirt/KVM**, **VMware vSphere**, or **Proxmox VE**, as **Podman c
 **Helm release** on an existing cluster - and there's a **fake mode** that runs the whole portal and
 control plane with no hypervisor at all, for demos and development.
 
+>[!TIP]
 > **New to KubeHarbor?** The fastest way to see it is fake mode:
 > ```bash
 > make up-fake      # portal at http://localhost:8080 - sign in as admin / admin
