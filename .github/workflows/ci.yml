@@ -23,8 +23,8 @@ jobs:
     name: Go (build · vet · test · fmt)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod # keep the toolchain pinned to go.mod (currently 1.26)
           cache: true
@@ -46,8 +46,8 @@ jobs:
       run:
         working-directory: web/portal
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -60,8 +60,8 @@ jobs:
     name: Helm chart (lint · template)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
       # Mirrors `make helm-lint`, but vendors the Vault subchart first (there is no Chart.lock in
       # the tree, so `dependency update` pulls it) - `helm template` fails without it.
       - name: Lint and render the chart in every mode
@@ -83,8 +83,8 @@ jobs:
       run:
         working-directory: infra/${{ matrix.module }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: opentofu/setup-opentofu@v1
+      - uses: actions/checkout@v7
+      - uses: opentofu/setup-opentofu@v2
       - run: tofu fmt -check -recursive
       # -backend=false: validate the module offline, no state backend or provider credentials.
       - run: tofu init -backend=false
@@ -97,8 +97,8 @@ jobs:
       run:
         working-directory: ansible
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       # Only ansible.builtin is used, so ansible-core alone is enough - no extra collections.
