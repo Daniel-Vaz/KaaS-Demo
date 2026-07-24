@@ -20,7 +20,7 @@
     "@mantine/core": "^7.15.0",
     "@mantine/form": "^7.15.0",
     "@mantine/hooks": "^7.15.0",
-    "@mantine/modals": "^7.15.0",
+    "@mantine/modals": "^9.4.2",
     "@mantine/notifications": "^7.15.0",
     "@tabler/icons-react": "^3.24.0",
     "@tanstack/react-query": "^5.62.0",
