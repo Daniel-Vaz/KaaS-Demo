@@ -12,7 +12,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /out/shell-agent ./cmd/shell-agent
 
-FROM docker.io/library/ubuntu:24.04
+FROM docker.io/library/ubuntu:26.04
 
 ARG KUBECTL_VERSION=1.36.2
 
