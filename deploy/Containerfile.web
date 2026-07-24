@@ -2,7 +2,7 @@
 # /api/* to the Go control-plane API (see deploy/nginx.conf), so the browser talks to a single
 # same-origin front door on :8080. Build context is the repo root (like the api/worker images);
 # .containerignore keeps web/portal/node_modules and dist out of the context.
-FROM docker.io/library/node:22-alpine AS build
+FROM docker.io/library/node:26-alpine AS build
 WORKDIR /app
 COPY web/portal/package.json web/portal/package-lock.json ./
 RUN npm ci --no-audit --no-fund
