@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate } from 'react-router';
 import { Center, Loader } from '@mantine/core';
 import { AppLayout } from './components/AppLayout';
 import { Overview } from './pages/Overview';

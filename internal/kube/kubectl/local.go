@@ -7,12 +7,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/Daniel-Vaz/KaaS-demo/internal/kube"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/kubeconfig"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/procstream"
 )
+
+// clusterIDRE is a plain allowlist - letters, digits, underscore, hyphen - with no ".", "/" or null
+// byte, so a value matching it can never escape WorkDir when joined into a path. clusterID always
+// reaches here via a *domain.Cluster already loaded from the store (see internal/kube/kubectl.Client),
+// never a raw request parameter, but it is checked at the point it is actually used to build a
+// filesystem path rather than trusted because of where callers happen to get it from.
+var clusterIDRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // LocalExecer runs kubectl directly on the host it lives on - the worker or the shell sandbox, the
 // only containers with a route to the cluster API server (see docs/networking.md). It writes each
@@ -113,6 +121,9 @@ func (e *LocalExecer) Stream(ctx context.Context, kc []byte, clusterID string, a
 }
 
 func (e *LocalExecer) writeKubeconfig(clusterID string, kc []byte) (string, error) {
+	if !clusterIDRE.MatchString(clusterID) {
+		return "", fmt.Errorf("kubectl: invalid cluster id %q", clusterID)
+	}
 	dir := filepath.Join(e.WorkDir, "kube", clusterID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err

@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router';
 import { Group, Title, Text, Select, Tabs, Alert, Anchor, Badge } from '@mantine/core';
 import { IconShieldHalf, IconAlertTriangle, IconServer2 } from '@tabler/icons-react';
 import { useClusters, useSecurityMeta, useSecurityOverview } from '../lib/queries';

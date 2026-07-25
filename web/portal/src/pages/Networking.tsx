@@ -10,7 +10,7 @@
 // selection so the page is deep-linkable, and a right-hand drawer per object kind.
 
 import { useEffect, useMemo, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router';
 import {
   Group,
   Title,

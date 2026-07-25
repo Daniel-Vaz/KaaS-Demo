@@ -1,6 +1,6 @@
 import { Button } from '@mantine/core';
 import { IconError404 } from '@tabler/icons-react';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { EmptyState } from '../components/EmptyState';
 
 export function NotFound() {

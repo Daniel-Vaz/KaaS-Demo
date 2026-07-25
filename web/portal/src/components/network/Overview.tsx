@@ -8,7 +8,7 @@
 // actual IP, the actual record), and the table under them answers the question it exists to serve:
 // what is actually reachable from outside, and at what URL.
 
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import {
   Card,
   Group,

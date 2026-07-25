@@ -254,24 +254,44 @@ func actorFrom(r *http.Request) *domain.User {
 	return a
 }
 
-// setSessionCookie issues a signed session cookie for userID. Not Secure: the local demo runs over
-// plain HTTP behind nginx - production would set Secure and terminate TLS at the edge.
-func (s *Server) setSessionCookie(w http.ResponseWriter, userID string) {
+// requestIsHTTPS reports whether the request reached the API over TLS - directly, or via a proxy
+// that terminated it and said so. The local demo runs plain HTTP behind nginx with nothing setting
+// this header, so Secure stays off there (a Secure cookie is simply dropped by the browser over
+// http://, which would break login) - production terminates TLS at the edge and sets it.
+func requestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+// setSessionCookie issues a signed session cookie for userID. Secure follows the request scheme -
+// see requestIsHTTPS.
+//
+// codeql[go/cookie-secure-not-set] -- Secure is conditional, not omitted or hardcoded false: the local
+// demo terminates at nginx over plain HTTP with nothing setting X-Forwarded-Proto, and a Secure cookie
+// is silently dropped by the browser over http://, which would break every login. It flips to Secure
+// automatically the moment TLS reaches the API, directly or via a proxy that says so.
+func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, userID string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    s.app.IssueSession(userID),
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   requestIsHTTPS(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(app.SessionTTL.Seconds()),
 	})
 }
 
 // clearSessionCookie expires the session cookie (logout).
-func clearSessionCookie(w http.ResponseWriter) {
+//
+// codeql[go/cookie-secure-not-set] -- same conditional Secure as setSessionCookie, and for the same
+// reason: it must match the cookie it is expiring, or a plain-HTTP browser would keep the session.
+func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: "", Path: "/", HttpOnly: true,
-		SameSite: http.SameSiteLaxMode, MaxAge: -1,
+		Secure: requestIsHTTPS(r), SameSite: http.SameSiteLaxMode, MaxAge: -1,
 	})
 }
 
@@ -1382,7 +1402,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err) // taken username, weak password, invalid name
 		return
 	}
-	s.setSessionCookie(w, u.ID)
+	s.setSessionCookie(w, r, u.ID)
 	writeJSON(w, http.StatusCreated, u)
 }
 
@@ -1402,7 +1422,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err)
 		return
 	}
-	s.setSessionCookie(w, u.ID)
+	s.setSessionCookie(w, r, u.ID)
 	writeJSON(w, http.StatusOK, u)
 }
 
@@ -1413,8 +1433,8 @@ func (s *Server) authConfig(w http.ResponseWriter, _ *http.Request) {
 }
 
 // logout clears the session cookie (idempotent; public).
-func (s *Server) logout(w http.ResponseWriter, _ *http.Request) {
-	clearSessionCookie(w)
+func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	clearSessionCookie(w, r)
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { NavLink as RouterNavLink, useLocation, useNavigate, Link } from 'react-router-dom';
+import { NavLink as RouterNavLink, useLocation, useNavigate, Link } from 'react-router';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   AppShell,

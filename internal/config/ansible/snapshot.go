@@ -183,7 +183,14 @@ func untarGz(archive []byte, dir string) error {
 		if name == "." || name == ".." || name == string(filepath.Separator) {
 			return fmt.Errorf("unexpected archive entry %q", hdr.Name)
 		}
-		out, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+		// Base() already strips every directory component, so target cannot leave dir - this is a
+		// belt-and-braces re-check on the actual joined path, the same shape as every other zipslip
+		// guard, so it holds even if a future edit changes how name is derived above.
+		target := filepath.Join(dir, name)
+		if rel, err := filepath.Rel(dir, target); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("unexpected archive entry %q escapes %s", hdr.Name, dir)
+		}
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 		if err != nil {
 			return err
 		}

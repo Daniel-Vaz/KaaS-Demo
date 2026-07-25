@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { Stack, Group, Text, Anchor, ThemeIcon, SimpleGrid } from '@mantine/core';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { IconPackages } from '@tabler/icons-react';
 import { useCustomCatalogs } from '../lib/queries';
 import { addonMeta } from '../lib/addonMeta';

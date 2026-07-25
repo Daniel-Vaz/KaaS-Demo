@@ -84,7 +84,7 @@ func (p *Proxier) Serve(w http.ResponseWriter, r *http.Request, c *domain.Cluste
 	// reschedule far ahead and stop spinning while auth-proxy keeps authenticating every real request.
 	// Production, fronting Grafana with a fixed hostname, would run a real session client instead of this shim.
 	if app.AuthProxy && r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, grafanaRotatePath) {
-		serveGrafanaRotateStub(w, tunnel.RoutePrefix(c.ID, app.ID))
+		serveGrafanaRotateStub(w, r, tunnel.RoutePrefix(c.ID, app.ID))
 		return
 	}
 	params := &reqParams{
@@ -102,21 +102,42 @@ func (p *Proxier) Serve(w http.ResponseWriter, r *http.Request, c *domain.Cluste
 
 // serveGrafanaRotateStub answers Grafana's session-token rotation with a synthetic success that pushes
 // the grafana_session_expiry cookie sessionKeepaliveWindow into the future. The SPA reads that cookie
-// (via document.cookie, so it must NOT be HttpOnly) to schedule its next rotation, so a future value
-// stops the immediate re-rotation; a 200 (vs. the real 401) stops the reload loop. cookiePath is the
-// app's browser-facing route prefix (tunnel.RoutePrefix), matching the path Grafana itself scopes the
-// cookie to, so the browser overwrites the stale one rather than keeping a second copy.
-func serveGrafanaRotateStub(w http.ResponseWriter, cookiePath string) {
+// (via document.cookie, so it must NOT be HttpOnly - mirroring Grafana's own cookie, which isn't either)
+// to schedule its next rotation, so a future value stops the immediate re-rotation; a 200 (vs. the real
+// 401) stops the reload loop. cookiePath is the app's browser-facing route prefix (tunnel.RoutePrefix),
+// matching the path Grafana itself scopes the cookie to, so the browser overwrites the stale one rather
+// than keeping a second copy. Secure follows the inbound request's own scheme, same as the portal's own
+// session cookie (internal/api.requestIsHTTPS) - plain HTTP in the local demo, behind a TLS-terminating
+// edge in production.
+func serveGrafanaRotateStub(w http.ResponseWriter, r *http.Request, cookiePath string) {
+	// codeql[go/cookie-httponly-not-set] -- deliberately not HttpOnly: the value is a UNIX timestamp the
+	// Grafana SPA itself reads via document.cookie to schedule its next rotation, never a credential,
+	// and this stub only mirrors the (also non-HttpOnly) cookie Grafana's own frontend sets.
+	//
+	// codeql[go/cookie-secure-not-set] -- Secure is conditional on the inbound request's own scheme
+	// (requestIsHTTPS), not omitted or hardcoded false - see internal/api.setSessionCookie for why a
+	// hardcoded true would break the plain-HTTP local demo.
 	http.SetCookie(w, &http.Cookie{
 		Name:     "grafana_session_expiry",
 		Value:    strconv.FormatInt(time.Now().Add(sessionKeepaliveWindow).Unix(), 10),
 		Path:     cookiePath,
 		MaxAge:   int(sessionKeepaliveWindow / time.Second),
-		SameSite: http.SameSiteLaxMode, // not Secure: the tunnel is same-origin HTTP here, matching Grafana's own cookie
+		Secure:   requestIsHTTPS(r),
+		SameSite: http.SameSiteLaxMode,
 	})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"message":"Token rotated"}`))
+}
+
+// requestIsHTTPS reports whether the request reached the API over TLS - directly, or via a proxy that
+// terminated it and said so. Same check as internal/api.requestIsHTTPS; duplicated rather than shared
+// to avoid a cross-package dependency for three lines.
+func requestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 func (p *Proxier) direct(req *http.Request) {

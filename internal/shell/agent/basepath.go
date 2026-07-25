@@ -91,7 +91,11 @@ func injectBasePathShim(body []byte, routePrefix string) []byte {
 	shim := []byte(strings.Replace(basePathShim, "%s", string(quoted), 1))
 
 	if i := headOpenEnd(body); i >= 0 {
-		out := make([]byte, 0, len(body)+len(shim))
+		size := len(body) + len(shim)
+		if size < len(body) { // overflow guard: len(shim) is fixed and small, so this only trips on a body near maxint
+			return body
+		}
+		out := make([]byte, 0, size)
 		out = append(out, body[:i]...)
 		out = append(out, shim...)
 		return append(out, body[i:]...)
