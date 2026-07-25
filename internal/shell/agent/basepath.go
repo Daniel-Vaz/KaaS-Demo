@@ -96,13 +96,16 @@ func injectBasePathShim(body []byte, routePrefix string) []byte {
 	shim := []byte(strings.Replace(basePathShim, "%s", string(quoted), 1))
 
 	if i := headOpenEnd(body); i >= 0 {
-		// Guard the addition below on the size of body itself, not its result: the only documents that
-		// reach this path are an SPA's index.html or an error page, so anything past maxRewritableBody
-		// is not one and is left untouched rather than trusted with an unchecked allocation.
+		// Guarded on body alone - the only documents that reach this path are an SPA's index.html or
+		// an error page, so anything past maxRewritableBody is not one and is left untouched rather
+		// than trusted with an allocation. The capacity hint below is deliberately body's length ALONE
+		// (no len(body)+len(shim) arithmetic): shim is fixed-size, so append grows the backing array
+		// at most once more than a perfectly-sized allocation would - a trade against ever computing a
+		// sum from two independently-sized values for a size argument.
 		if len(body) > maxRewritableBody {
 			return body
 		}
-		out := make([]byte, 0, len(body)+len(shim))
+		out := make([]byte, 0, len(body))
 		out = append(out, body[:i]...)
 		out = append(out, shim...)
 		return append(out, body[i:]...)
