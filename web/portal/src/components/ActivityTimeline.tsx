@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useLayoutEffect, useRef } from 'react';
 import { Badge, Box, Group, Text, ScrollArea, Center, Loader } from '@mantine/core';
 import { IconActivity } from '@tabler/icons-react';
 import { timeOfDay } from '../lib/format';
@@ -48,11 +48,15 @@ export function ActivityTimeline({
   const pinnedRef = useRef(true);
 
   // Autoscroll only when the user is already near the bottom, so scrolling up to read history
-  // isn't yanked back down by new lines.
-  useEffect(() => {
+  // isn't yanked back down by new lines. Runs in a layout effect (before paint) and affirms
+  // pinnedRef itself rather than waiting for the resulting native 'scroll' event to echo back -
+  // under a fast burst of events that echo can be skipped/coalesced, which used to leave
+  // pinnedRef stuck at false with nothing left to flip it back.
+  useLayoutEffect(() => {
     const vp = viewportRef.current;
     if (vp && pinnedRef.current) {
-      vp.scrollTo({ top: vp.scrollHeight });
+      vp.scrollTop = vp.scrollHeight;
+      pinnedRef.current = true;
     }
   }, [events]);
 
@@ -73,7 +77,7 @@ export function ActivityTimeline({
         onScrollPositionChange={({ y }) => {
           const vp = viewportRef.current;
           if (!vp) return;
-          pinnedRef.current = y + vp.clientHeight >= vp.scrollHeight - 24;
+          pinnedRef.current = y + vp.clientHeight >= vp.scrollHeight - 32;
         }}
         className={classes.log}
       >
