@@ -216,7 +216,7 @@ logs-fake:
 WEB_DIR := web/portal
 
 web-install: ## Install portal dependencies (npm ci)
-	cd $(WEB_DIR) && npm ci
+	cd $(WEB_DIR) && npm ci --legacy-peer-deps
 
 web-dev: ## Vite dev server on :5173, proxying /api -> localhost:8080 (run `make run-api` alongside)
 	cd $(WEB_DIR) && npm run dev

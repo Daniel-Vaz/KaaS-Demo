@@ -10,7 +10,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /out/worker ./cmd/worker
 
-FROM docker.io/library/ubuntu:24.04
+FROM docker.io/library/ubuntu:26.04
 
 # Pinned toolchain versions.
 ARG TOFU_VERSION=1.10.3

@@ -2,10 +2,13 @@
 # /api/* to the Go control-plane API (see deploy/nginx.conf), so the browser talks to a single
 # same-origin front door on :8080. Build context is the repo root (like the api/worker images);
 # .containerignore keeps web/portal/node_modules and dist out of the context.
-FROM docker.io/library/node:22-alpine AS build
+FROM docker.io/library/node:26-alpine AS build
 WORKDIR /app
 COPY web/portal/package.json web/portal/package-lock.json ./
-RUN npm ci --no-audit --no-fund
+# --legacy-peer-deps: @xterm/addon-fit's stable line only declares a peer on @xterm/xterm ^5.0.0
+# (the ^6.0.0-compatible release is still a beta); verified in-browser that xterm 6 + addon-fit
+# 0.10.0 render, accept input and resize correctly despite the unmet peer.
+RUN npm ci --no-audit --no-fund --legacy-peer-deps
 COPY web/portal/ ./
 RUN npm run build
 

@@ -351,7 +351,7 @@ export function CreateCluster() {
         </div>
       </Group>
 
-      <Grid gutter="lg" align="flex-start">
+      <Grid gap="lg" align="flex-start">
         {/* Main wizard column */}
         <Grid.Col span={{ base: 12, lg: 8 }}>
           <Card radius="md" padding="xl">

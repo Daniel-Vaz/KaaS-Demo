@@ -303,7 +303,7 @@ const AuditRow = memo(function AuditRow({
       </Table.Tr>
       <Table.Tr>
         <Table.Td colSpan={6} p={0} style={{ borderBottom: open ? undefined : 'none' }}>
-          <Collapse in={open}>{open && <AuditDetail event={e} />}</Collapse>
+          <Collapse expanded={open}>{open && <AuditDetail event={e} />}</Collapse>
         </Table.Td>
       </Table.Tr>
     </>

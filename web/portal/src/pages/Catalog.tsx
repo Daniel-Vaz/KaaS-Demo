@@ -249,7 +249,7 @@ function AddonRow({ addon }: { addon: CatalogAddon }) {
           </Group>
         </Group>
       </UnstyledButton>
-      <Collapse in={open}>
+      <Collapse expanded={open}>
         <Stack gap={6} pl={54} pr="xs" pb="sm" pt={4}>
           {addon.description && (
             <Text size="xs" c="dimmed">

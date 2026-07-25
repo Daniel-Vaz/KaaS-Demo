@@ -156,7 +156,7 @@ services:
   # KV mount and per-cluster paths/policies on top; it never touches Vault's dev `secret/` mount. On the
   # kaas network as `vault:8200`; the UI is published on the host by compose.ports.yaml.
   vault:
-    image: docker.io/hashicorp/vault:1.18
+    image: docker.io/hashicorp/vault:2.0
     command: server -dev -dev-listen-address=0.0.0.0:8200
     environment:
       - VAULT_DEV_ROOT_TOKEN_ID=${KAAS_VAULT_TOKEN:-kaas-root-dev}
@@ -165,13 +165,15 @@ services:
     networks: [kaas]
 
   postgres:
-    image: docker.io/library/postgres:16
+    image: docker.io/library/postgres:18
     environment:
       - POSTGRES_USER=kaas
       - POSTGRES_PASSWORD=kaas
       - POSTGRES_DB=kaas
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # 18+'s image stores data in a major-version-specific subdirectory it creates itself under
+      # this mount, so it must be the parent dir - not /var/lib/postgresql/data as with <=17.
+      - pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U kaas"]
       interval: 3s

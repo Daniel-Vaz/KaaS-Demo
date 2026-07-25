@@ -13,7 +13,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /out/node-ssh-agent ./cmd/node-ssh-agent
 
-FROM docker.io/library/ubuntu:24.04
+FROM docker.io/library/ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
