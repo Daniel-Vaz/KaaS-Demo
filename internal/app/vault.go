@@ -70,7 +70,7 @@ func vaultLDAPAuth() (*vault.LDAPAuth, error) {
 		URL:          url,
 		StartTLS:     startTLS,
 		BindDN:       cfg.BindDN,
-		BindPassword: os.Getenv(cfg.BindPasswordEnv),
+		BindPassword: os.Getenv(cfg.BindEnvVar),
 		UserDN:       cfg.UserBaseDN,
 		UserAttr:     getenv2(cfg.UsernameAttr, "sAMAccountName"),
 		InsecureTLS:  cfg.InsecureSkipVerify,

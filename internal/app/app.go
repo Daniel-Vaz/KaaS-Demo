@@ -2568,10 +2568,6 @@ func (a *App) Login(ctx context.Context, username, password, clientIP string) (*
 		// An unreachable directory or a broken service account is the platform's fault. Reporting it
 		// as a bad password would send users off to reset a password that was never wrong - and it
 		// must not count against the throttle either.
-		//
-		// codeql[go/clear-text-logging] -- a bad service-account bind wraps ldap.Config.BindPasswordEnv,
-		// which names the env var to check (e.g. "KAAS_LDAP_BIND_PASSWORD"); it is never the password
-		// value itself (that lives in the unexported bindPassword field and is never logged or wrapped).
 		a.Log.Error("directory authentication failed", "username", username, "err", err)
 		return nil, err
 	}

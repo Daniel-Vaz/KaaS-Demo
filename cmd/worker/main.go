@@ -28,9 +28,6 @@ func main() {
 
 	a, err := app.New(log)
 	if err != nil {
-		// codeql[go/clear-text-logging] -- a bad LDAP bind wraps ldap.Config.BindPasswordEnv, which
-		// names the env var to check (e.g. "KAAS_LDAP_BIND_PASSWORD"); it is never the password value
-		// itself (that lives in the unexported bindPassword field and is never logged or wrapped).
 		log.Error("init app", "err", err)
 		os.Exit(1)
 	}

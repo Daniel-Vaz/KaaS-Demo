@@ -265,13 +265,11 @@ func requestIsHTTPS(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
-// setSessionCookie issues a signed session cookie for userID. Secure follows the request scheme -
-// see requestIsHTTPS.
-//
-// codeql[go/cookie-secure-not-set] -- Secure is conditional, not omitted or hardcoded false: the local
-// demo terminates at nginx over plain HTTP with nothing setting X-Forwarded-Proto, and a Secure cookie
-// is silently dropped by the browser over http://, which would break every login. It flips to Secure
-// automatically the moment TLS reaches the API, directly or via a proxy that says so.
+// setSessionCookie issues a signed session cookie for userID. Secure follows the request scheme
+// (requestIsHTTPS) rather than a hardcoded true or false: the local demo terminates at nginx over
+// plain HTTP with nothing setting X-Forwarded-Proto, and a Secure cookie is silently dropped by the
+// browser over http://, which would break every login - but it flips to Secure automatically the
+// moment TLS reaches the API, directly or via a proxy that says so.
 func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, userID string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
@@ -284,10 +282,8 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, userID
 	})
 }
 
-// clearSessionCookie expires the session cookie (logout).
-//
-// codeql[go/cookie-secure-not-set] -- same conditional Secure as setSessionCookie, and for the same
-// reason: it must match the cookie it is expiring, or a plain-HTTP browser would keep the session.
+// clearSessionCookie expires the session cookie (logout). Secure mirrors setSessionCookie's - it
+// must match the cookie it is expiring, or a plain-HTTP browser would keep the session.
 func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: "", Path: "/", HttpOnly: true,

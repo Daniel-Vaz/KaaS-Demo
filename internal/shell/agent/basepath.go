@@ -33,6 +33,11 @@ import (
 // serve from the root it expects. This exists because a demo control plane reaches clusters only
 // through the API server's service proxy, where a per-app hostname is not available.
 
+// maxRewritableBody bounds injectBasePathShim's input: no real SPA entrypoint or error page - the
+// only documents that ever reach it - comes close to this, so it exists purely to keep the size
+// arithmetic below provably safe rather than to accommodate anything legitimate.
+const maxRewritableBody = 64 * 1024 * 1024 // 64MiB
+
 // basePathShim is the injected script, with %s replaced by the JSON-quoted route prefix.
 //
 // The guards matter more than the wrapping:
@@ -91,11 +96,13 @@ func injectBasePathShim(body []byte, routePrefix string) []byte {
 	shim := []byte(strings.Replace(basePathShim, "%s", string(quoted), 1))
 
 	if i := headOpenEnd(body); i >= 0 {
-		size := len(body) + len(shim)
-		if size < len(body) { // overflow guard: len(shim) is fixed and small, so this only trips on a body near maxint
+		// Guard the addition below on the size of body itself, not its result: the only documents that
+		// reach this path are an SPA's index.html or an error page, so anything past maxRewritableBody
+		// is not one and is left untouched rather than trusted with an unchecked allocation.
+		if len(body) > maxRewritableBody {
 			return body
 		}
-		out := make([]byte, 0, size)
+		out := make([]byte, 0, len(body)+len(shim))
 		out = append(out, body[:i]...)
 		out = append(out, shim...)
 		return append(out, body[i:]...)

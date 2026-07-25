@@ -232,11 +232,11 @@ func TestNewRequiresBindPassword(t *testing.T) {
 		t.Fatalf("a bind_dn with no password must still PARSE (the fake directory needs this): %v", err)
 	}
 	_, err = New(c, discard())
-	if err == nil || !strings.Contains(err.Error(), defaultPasswordEnv) {
-		t.Fatalf("New = %v, want it rejected and naming %s", err, defaultPasswordEnv)
+	if err == nil || !strings.Contains(err.Error(), defaultBindEnvVar) {
+		t.Fatalf("New = %v, want it rejected and naming %s", err, defaultBindEnvVar)
 	}
 
-	t.Setenv(defaultPasswordEnv, "s3cret")
+	t.Setenv(defaultBindEnvVar, "s3cret")
 	c, err = Parse([]byte(y))
 	if err != nil {
 		t.Fatalf("Parse with the password set: %v", err)

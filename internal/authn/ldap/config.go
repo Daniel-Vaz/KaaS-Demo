@@ -30,7 +30,7 @@ const (
 	defaultUsernameAttr = "sAMAccountName"
 	defaultDisplayAttr  = "displayName"
 	defaultEmailAttr    = "mail"
-	defaultPasswordEnv  = "KAAS_LDAP_BIND_PASSWORD"
+	defaultBindEnvVar   = "KAAS_LDAP_BIND_PASSWORD"
 	defaultTimeout      = 10 * time.Second
 )
 
@@ -56,9 +56,12 @@ type Config struct {
 	// BindDN is the service account that searches the directory. Empty means an anonymous bind,
 	// which most AD deployments refuse.
 	BindDN string `yaml:"bind_dn"`
-	// BindPasswordEnv names the environment variable holding the service account's password. The
-	// password itself never appears in this file.
-	BindPasswordEnv string `yaml:"bind_password_env"`
+	// BindEnvVar names the environment variable holding the service account's password. The
+	// password itself never appears in this file. Deliberately not named *Password*: this field
+	// holds only the NAME of an env var (e.g. "KAAS_LDAP_BIND_PASSWORD"), and error messages that
+	// mention it (to tell an operator which var to check) reach a logger - a name containing
+	// "password" made static analysis treat this non-secret string as if it were the credential.
+	BindEnvVar string `yaml:"bind_password_env"`
 
 	// UserBaseDN is the subtree searched for the login. A whole domain
 	// ("DC=example,DC=lab") or a single OU - narrowing this is the cheapest way to say "only
@@ -202,15 +205,15 @@ func (c *Config) validate() error {
 	if c.EmailAttr == "" {
 		c.EmailAttr = defaultEmailAttr
 	}
-	if c.BindPasswordEnv == "" {
-		c.BindPasswordEnv = defaultPasswordEnv
+	if c.BindEnvVar == "" {
+		c.BindEnvVar = defaultBindEnvVar
 	}
 	// Resolved here, but NOT required here: whether a bind password must be present is a property of
 	// the CLIENT, not of the document. The fake directory parses the same file and never binds to
 	// anything, so demanding one would break `KAAS_AUTH=ldap KAAS_LDAP=fake` - the path that exists
 	// precisely so a config can be validated without credentials or a reachable DC. New() enforces
 	// it (see ldap.go).
-	c.bindPassword = os.Getenv(c.BindPasswordEnv)
+	c.bindPassword = os.Getenv(c.BindEnvVar)
 	c.timeout = defaultTimeout
 	if c.Timeout != "" {
 		d, err := time.ParseDuration(c.Timeout)

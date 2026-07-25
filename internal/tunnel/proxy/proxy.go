@@ -110,13 +110,6 @@ func (p *Proxier) Serve(w http.ResponseWriter, r *http.Request, c *domain.Cluste
 // session cookie (internal/api.requestIsHTTPS) - plain HTTP in the local demo, behind a TLS-terminating
 // edge in production.
 func serveGrafanaRotateStub(w http.ResponseWriter, r *http.Request, cookiePath string) {
-	// codeql[go/cookie-httponly-not-set] -- deliberately not HttpOnly: the value is a UNIX timestamp the
-	// Grafana SPA itself reads via document.cookie to schedule its next rotation, never a credential,
-	// and this stub only mirrors the (also non-HttpOnly) cookie Grafana's own frontend sets.
-	//
-	// codeql[go/cookie-secure-not-set] -- Secure is conditional on the inbound request's own scheme
-	// (requestIsHTTPS), not omitted or hardcoded false - see internal/api.setSessionCookie for why a
-	// hardcoded true would break the plain-HTTP local demo.
 	http.SetCookie(w, &http.Cookie{
 		Name:     "grafana_session_expiry",
 		Value:    strconv.FormatInt(time.Now().Add(sessionKeepaliveWindow).Unix(), 10),

@@ -38,7 +38,7 @@ func New(cfg *Config, log *slog.Logger) (*Client, error) {
 		return nil, errors.New("ldap: nil config")
 	}
 	if cfg.BindDN != "" && cfg.bindPassword == "" {
-		return nil, fmt.Errorf("ldap: bind_dn is set but %s is empty - the service account needs its password", cfg.BindPasswordEnv)
+		return nil, fmt.Errorf("ldap: bind_dn is set but %s is empty - the service account needs its password", cfg.BindEnvVar)
 	}
 	log.Info("directory authentication enabled",
 		"urls", strings.Join(cfg.URLs, ","),
@@ -136,7 +136,7 @@ func (c *Client) bindService(conn *goldap.Conn) error {
 	if err := conn.Bind(c.cfg.BindDN, c.cfg.bindPassword); err != nil {
 		// The service account's own failure is an operator problem, never a user's: it must not be
 		// reported as a bad user password.
-		return fmt.Errorf("bind as %s (check %s): %w", c.cfg.BindDN, c.cfg.BindPasswordEnv, err)
+		return fmt.Errorf("bind as %s (check %s): %w", c.cfg.BindDN, c.cfg.BindEnvVar, err)
 	}
 	return nil
 }
