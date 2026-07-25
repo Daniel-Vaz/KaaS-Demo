@@ -52,7 +52,10 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: web/portal/package-lock.json
-      - run: npm ci
+      # --legacy-peer-deps: @xterm/addon-fit's stable line only declares a peer on @xterm/xterm
+      # ^5.0.0 (the ^6.0.0-compatible release is still a beta); verified in-browser that xterm 6 +
+      # addon-fit 0.10.0 render, accept input and resize correctly despite the unmet peer.
+      - run: npm ci --legacy-peer-deps
       # `npm run build` is `tsc --noEmit && vite build` - type-check then bundle.
       - run: npm run build
 
