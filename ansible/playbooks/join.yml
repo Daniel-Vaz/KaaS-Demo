@@ -5,7 +5,7 @@
 # Idempotent: the worker role skips nodes that have already joined.
 #
 # The "Join workers" play may target a VM tofu JUST created (a rolling replacement runs Ansible
-# right after `apply`): tofu's wait_for_lease only confirms a DHCP lease, not that cloud-init has
+# right after `apply`): tofu's wait_for_ip only confirms a DHCP lease, not that cloud-init has
 # finished bringing up sshd, so connecting immediately can hit a transient "Connection refused".
 # wait_for_connection blocks until the node genuinely accepts SSH before anything else runs.
 - name: Mint a worker join command on the control plane

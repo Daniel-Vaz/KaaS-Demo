@@ -13,16 +13,19 @@ import (
 )
 
 // StageImage makes the golden image at localPath available as a volume named name in the
-// hypervisor's storage pool, uploading it only if it isn't already there. It is the remote-KVM
-// replacement for letting the OpenTofu libvirt provider import the image itself.
+// hypervisor's storage pool, uploading it only if it isn't already there, and returns the PATH it
+// lives at on the hypervisor. It is the remote-KVM replacement for letting the OpenTofu libvirt
+// provider import the image itself.
 //
-// Why this exists rather than just passing the path to the provider: the provider's libvirt_volume
-// declares no Timeouts block, so its create inherits the plugin SDK's fixed 20-minute default. A
-// multi-GB qcow2 over a slow link to the hypervisor simply cannot finish inside that, and the
-// timeout is not reachable from HCL - the import would fail forever, restarting from zero each try.
-// Staging out-of-band moves the transfer under our own (configurable) reconcile budget, and - the
-// bigger win - makes it happen ONCE PER IMAGE instead of once per cluster: every later cluster
-// clones from the staged volume and provisions with no upload at all.
+// The path, not just the name, is what the caller needs: the libvirt module backs each node's root
+// volume onto it (`backing_store.path`), and only this side of the seam knows where the pool
+// actually is.
+//
+// Why this exists rather than just passing the local path to the provider and letting it import the
+// image: the import streams a multi-GB qcow2 over the libvirt connection ONCE PER CLUSTER, inside
+// whatever timeout the provider chose, with no resume. Staging out-of-band moves the transfer under
+// our own (configurable) reconcile budget, and - the bigger win - makes it happen once per IMAGE:
+// every later cluster's nodes back onto the staged volume and provision with no upload at all.
 //
 // Idempotent, which is what lets the reconcile loop simply retry it: an image whose staged size
 // already matches the local file is left alone.
@@ -31,23 +34,23 @@ import (
 // assumes a dir-backed pool, which is what libvirt's `default` is) and is not resumable - an
 // interrupted upload restarts. A real platform would keep golden images in an image registry the
 // hypervisors pull from, not push them from the control plane.
-func (h *Host) StageImage(ctx context.Context, pool, name, localPath string, emit func(string)) error {
+func (h *Host) StageImage(ctx context.Context, pool, name, localPath string, emit func(string)) (string, error) {
 	if !h.Remote() {
-		return fmt.Errorf("kvmhost: StageImage called with no remote KVM host")
+		return "", fmt.Errorf("kvmhost: StageImage called with no remote KVM host")
 	}
 	fi, err := os.Stat(localPath)
 	if err != nil {
-		return fmt.Errorf("kvmhost: golden image %q: %w", localPath, err)
+		return "", fmt.Errorf("kvmhost: golden image %q: %w", localPath, err)
 	}
 	size := fi.Size()
 
-	staged, err := h.stagedSize(ctx, pool, name)
+	remotePath, staged, err := h.stagedImage(ctx, pool, name)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if staged == size {
 		emit(fmt.Sprintf("golden image %s already staged on KVM host %s (%s) - skipping upload", name, h.Addr, humanSize(size)))
-		return nil
+		return remotePath, nil
 	}
 	if staged >= 0 {
 		// A size mismatch means a previous upload was cut short (or the image was rebuilt); re-upload
@@ -58,33 +61,41 @@ func (h *Host) StageImage(ctx context.Context, pool, name, localPath string, emi
 	emit(fmt.Sprintf("uploading golden image %s (%s) to KVM host %s - this happens once per image; every later cluster clones it with no upload", name, humanSize(size), h.Addr))
 	start := time.Now()
 	if err := h.upload(ctx, pool, name, localPath); err != nil {
-		return err
+		return "", err
 	}
 	elapsed := time.Since(start)
 	emit(fmt.Sprintf("staged golden image %s in %s (%.1f MB/s)", name, elapsed.Round(time.Second), float64(size)/(1<<20)/elapsed.Seconds()))
-	return nil
+	return remotePath, nil
 }
 
-// stagedSize returns the size of the named volume's backing file in the pool, or -1 if it is absent.
-func (h *Host) stagedSize(ctx context.Context, pool, name string) (int64, error) {
+// stagedImage returns where the named volume would live in the pool, and its current size there - or
+// -1 if it is absent. The path is reported either way: it is where the upload is about to put the
+// image, so a caller that stages then provisions needs it on both branches.
+func (h *Host) stagedImage(ctx context.Context, pool, name string) (string, int64, error) {
 	script := `set -e
 dir=$(virsh -c qemu:///system pool-dumpxml "$1" | sed -n 's:.*<path>\(.*\)</path>.*:\1:p' | head -1)
 [ -n "$dir" ] || { echo "pool $1 has no target path (not a dir-backed pool?)" >&2; exit 1; }
 f="$dir/$2"
+echo "$f"
 if [ -f "$f" ]; then stat -c %s "$f"; else echo missing; fi`
 	out, err := h.runSSH(ctx, nil, script, pool, name)
 	if err != nil {
-		return 0, fmt.Errorf("kvmhost: inspect staged image %q on %s: %w", name, h.Addr, err)
+		return "", 0, fmt.Errorf("kvmhost: inspect staged image %q on %s: %w", name, h.Addr, err)
 	}
-	out = strings.TrimSpace(out)
-	if out == "missing" {
-		return -1, nil
+	// Line-split rather than word-split: the first line is a filesystem path, which may contain spaces.
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 {
+		return "", 0, fmt.Errorf("kvmhost: unexpected reply %q inspecting staged image %q", strings.TrimSpace(out), name)
+	}
+	path, size := strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1])
+	if size == "missing" {
+		return path, -1, nil
 	}
 	var n int64
-	if _, err := fmt.Sscanf(out, "%d", &n); err != nil {
-		return 0, fmt.Errorf("kvmhost: unexpected size %q for staged image %q", out, name)
+	if _, err := fmt.Sscanf(size, "%d", &n); err != nil {
+		return "", 0, fmt.Errorf("kvmhost: unexpected size %q for staged image %q", size, name)
 	}
-	return n, nil
+	return path, n, nil
 }
 
 // upload streams the local file into the pool's directory and refreshes the pool so libvirt picks

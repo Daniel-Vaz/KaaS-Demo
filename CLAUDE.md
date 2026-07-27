@@ -57,7 +57,12 @@ act** - a repairer without those is a cluster shredder.
 - **State + queue:** Postgres - desired/observed state *and* the durable job queue
   (`riverqueue/river`). Unset `DATABASE_URL` falls back to an in-memory store + tick loop.
 - **VM infra:** OpenTofu, one workspace per cluster - the `dmacvicar/libvirt` provider for KVM
-  (module `infra/libvirt/`, wrapper `internal/provision/tofu`), `hashicorp/vsphere` for vSphere
+  (module `infra/libvirt/`, wrapper `internal/provision/tofu`; the module is written against the
+  **0.9** schema, a ground-up rewrite in which HCL maps ~1:1 onto libvirt's own XML - and where the
+  provider refuses every volume update but forgets to mark the creation-time inputs as forcing
+  replacement, so the module supplies that itself via `terraform_data.node_volume_shape`, which is
+  what makes a rolling OS upgrade rebuild a node rather than fail its reconcile step forever),
+  `hashicorp/vsphere` for vSphere
   (module `infra/vsphere/`, wrapper `internal/provision/vsphere`) and `bpg/proxmox` for Proxmox VE
   (module `infra/proxmox/`, wrapper `internal/provision/proxmox`); shared mechanics in
   `internal/provision/tofurunner`.
@@ -816,8 +821,9 @@ re-running the same rung outside the policy that decided it was due.
 
 `provision.NodeReplacer` is the one genuinely new mechanism. `EnsureNodes` is *converge*, so a VM that
 exists but is broken already matches its spec; the OS upgrade only sidesteps this because a changed
-image is ForceNew. It is implemented as `tofu apply -replace`, and on libvirt it names the **root
-volume as well as the domain** - replacing the domain alone re-attaches the same copy-on-write root
+image forces the root volume's replacement (on libvirt, via the `terraform_data.node_volume_shape`
+trigger the module carries - see below). It is implemented as `tofu apply -replace`, and on libvirt it
+names the **root volume as well as the domain** - replacing the domain alone re-attaches the same copy-on-write root
 disk, repairing nothing - while deliberately **excluding the extra disks**, which hold the node's data
 and its Longhorn replicas. That extra-disk preservation is now **uniform across all three providers**,
 because each keeps a node's extra disks in a resource INDEPENDENT of its VM: a `libvirt_volume`, a
@@ -861,10 +867,17 @@ Six things are load-bearing:
   VM that exists only to own the volumes, since bpg has no standalone disk resource) attached to the
   node by `path_in_datastore`. Tofu owns the volumes on all three; only the node↔disk *attachment*
   varies.
-- **On kvm, that attachment is converged with `virsh`, not OpenTofu** - the provider marks
-  `libvirt_domain`'s `disk` ForceNew at the LIST level, so declaring a new disk would REBUILD the node.
+- **On kvm, that attachment is converged with `virsh`, not OpenTofu** - OpenTofu can only converge a
+  domain's device list by REDEFINING the domain, which writes libvirt's persistent XML and leaves the
+  running QEMU process untouched, so "attach storage to this worker" would do nothing until the node
+  rebooted (and on the old 0.8 provider, worse: the disk list was ForceNew, so it destroyed the node).
   The module declares the disks (so a replaced domain comes back with them) but `ignore_changes =
-  [disk]`, and `internal/provision/tofu/disks.go` diffs `virsh dumpxml` and hot-attaches. **Ordering
+  [devices]`, and `internal/provision/tofu/disks.go` diffs `virsh dumpxml` and hot-attaches
+  `--live --persistent`, which updates both copies at once. For that attach to be possible at all the
+  module declares a **virtio-scsi controller on every node, whether or not it has disks**: libvirt adds
+  one implicitly only for a *declared* scsi disk, so hot-attaching a first disk would have to hot-add
+  the controller too - a PCI hotplug i440fx refuses - and the feature would fail on exactly the nodes
+  with no storage yet. **Ordering
   around `apply` is load-bearing**: a volume must exist while its disk is attached, so `EnsureNodes`
   DETACHES removed disks before apply (while their volumes live), applies, then ATTACHES new ones - and
   `DestroyCluster` sweeps disks off every domain before `tofu destroy`. Detach-after-apply (or a

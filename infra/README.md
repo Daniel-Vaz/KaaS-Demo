@@ -16,8 +16,10 @@ and nothing above the provision seam is provider-aware.
 
 ## Provider version pins
 
-- `libvirt/versions.tf` pins **`dmacvicar/libvirt ~> 0.8.0`** - the classic schema `main.tf` uses. The
-  0.9.x line is an incompatible ground-up rewrite; **do not bump the pin without rewriting `main.tf`.**
+- `libvirt/versions.tf` allows **`dmacvicar/libvirt ~> 0.9.8`**. The 0.9 line is a ground-up rewrite of
+  the provider (plugin-framework; HCL maps ~1:1 onto libvirt's domain/network/volume XML) sharing no
+  schema with 0.8, and `main.tf` is written against it. The floor is the version actually exercised,
+  so later 0.9.x releases still arrive as Dependabot PRs; they are safe to take, a 0.10 is not.
 - `vsphere` pins `hashicorp/vsphere`, `proxmox` pins `bpg/proxmox`.
 
 Validate any module locally without touching a backend:

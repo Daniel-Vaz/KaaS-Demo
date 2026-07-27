@@ -84,11 +84,11 @@ credential-free.
 
 Two things worth knowing for a remote host:
 
-- **Golden images are staged, not imported.** The libvirt provider's per-cluster image import inherits
-  a fixed 20-minute timeout that a multi-GB upload over a slow link can't meet. So with `KAAS_KVM_HOST`
-  the provisioner uploads each image into the hypervisor's pool once (over SSH) and every cluster clones
-  it by name - under your own `KAAS_RECONCILE_JOB_TIMEOUT` budget, which you'll almost always need to
-  raise. Measure your link and size the timeout above `image_size / rate`.
+- **Golden images are staged, not imported.** Importing an image through the provider streams it over
+  the libvirt connection once per cluster. So with `KAAS_KVM_HOST` the provisioner instead uploads each
+  image into the hypervisor's pool once (over SSH) and every cluster's nodes back onto it there - under
+  your own `KAAS_RECONCILE_JOB_TIMEOUT` budget, which you'll almost always need to raise. Measure your
+  link and size the timeout above `image_size / rate`.
 - **A bare KVM host needs a `default` storage pool** (`virsh pool-define-as default dir --target
   /var/lib/libvirt/images` + autostart + start), and host keys aren't verified unless
   `KAAS_KVM_KNOWN_HOSTS_FILE` is set.
@@ -98,9 +98,12 @@ need their own tunnel (`ssh -D 1080 <kvm-host>`, then `kubectl --proxy-url socks
 
 ## The module and its version pin
 
-`infra/libvirt/versions.tf` pins `dmacvicar/libvirt` to `~> 0.8.0` - the classic schema `main.tf` uses.
-The 0.9.x line is an incompatible rewrite; **don't bump the pin without rewriting `main.tf`.** Validate
-the module without touching libvirt:
+`infra/libvirt/versions.tf` allows `dmacvicar/libvirt ~> 0.9.8`, the line `main.tf` is written against.
+0.9 was a ground-up rewrite of the provider - HCL maps ~1:1 onto libvirt's own domain/network/volume
+XML - and shares no schema with 0.8, so the module spells out what 0.8 used to infer: the network's
+gateway address and DHCP range, each disk's target device and bus, the cloud-init ISO as a pool volume
+attached as a CD-ROM. Later 0.9.x bumps are safe to take; a 0.10 would want reading first. Validate the
+module without touching libvirt:
 
 ```bash
 cd infra/libvirt && tofu init -backend=false && tofu validate

@@ -3544,9 +3544,9 @@ func buildTofuProvisioner(log *slog.Logger, sink events.Sink, kvm *kvmhost.Host)
 		// qemu:///system locally, qemu+ssh://... for a remote KVM host (KAAS_LIBVIRT_URI still wins).
 		LibvirtURI: kvm.LibvirtURI(),
 		Pool:       getenv("KAAS_LIBVIRT_POOL", "default"),
-		// Remote only: pre-stage golden images in the hypervisor's pool and clone them there,
-		// instead of importing each through OpenTofu (which its fixed 20m volume timeout makes
-		// impossible over a slow link). nil locally, where the provider does the import itself.
+		// Remote only: pre-stage golden images in the hypervisor's pool and back node volumes onto
+		// them there, instead of streaming each through OpenTofu once per cluster. nil locally, where
+		// the provider does the import itself.
 		Stager:       imageStager(kvm),
 		BaseImage:    os.Getenv("KAAS_BASE_IMAGE"),
 		ImageDir:     os.Getenv("KAAS_IMAGE_DIR"),

@@ -126,9 +126,13 @@ func (h *Host) LibvirtURI() string {
 	// paths are far easier to read (and to eyeball in a log line) this way.
 	//
 	// Param name is "knownhosts" (no underscore) - that's the provider's own query key
-	// (libvirt/uri/ssh.go, dmacvicar/terraform-provider-libvirt v0.8.3), NOT "known_hosts". Passing
-	// the wrong name doesn't error; the provider just silently ignores it and falls back to its own
-	// default (${HOME}/.ssh/known_hosts on whatever host runs OpenTofu), which then fails to open.
+	// (internal/libvirt/dialers/factory.go, dmacvicar/terraform-provider-libvirt v0.9.8; unchanged
+	// from the 0.8 line's libvirt/uri/ssh.go), NOT "known_hosts". Passing the wrong name doesn't
+	// error; the provider just silently ignores it and falls back to its own default
+	// (${HOME}/.ssh/known_hosts on whatever host runs OpenTofu), which then fails to open.
+	// "sshauth" is a libvirt URI parameter the 0.9 provider's own dialer no longer reads - it picks
+	// key auth from "keyfile" - but it is inert rather than wrong, and it is what libvirt itself
+	// documents, so it stays.
 	params := []string{"sshauth=privkey", "keyfile=" + h.KeyFile}
 	if h.KnownHostsFile != "" {
 		params = append(params, "knownhosts="+h.KnownHostsFile)

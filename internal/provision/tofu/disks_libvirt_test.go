@@ -149,26 +149,31 @@ func TestLibvirtAttachDetachRoundTrip(t *testing.T) {
 		"--subdriver", "qcow2", "--targetbus", "scsi", "--wwn", "0x5000c50012340002"); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	disks, running, err := p.domainDisks(context.Background(), dom)
+	set, err := p.domainDisks(context.Background(), dom)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !running {
+	if !set.Running {
 		t.Fatal("domain should be running")
 	}
-	if disks["5000c50012340002"] != "sdb" {
-		t.Fatalf("domainDisks = %v, want the wwn mapped to sdb", disks)
+	if set.ByWWN["5000c50012340002"] != "sdb" {
+		t.Fatalf("domainDisks = %v, want the wwn mapped to sdb", set.ByWWN)
+	}
+	// The root disk carries no wwn, so it is absent from ByWWN but must still be counted as a target
+	// in use - that wider set is what freeTarget picks against.
+	if !set.UsedTargets["vda"] || !set.UsedTargets["sdb"] {
+		t.Fatalf("UsedTargets = %v, want both the root disk (vda) and the extra disk (sdb)", set.UsedTargets)
 	}
 
 	// Detach through the real helper; the disk must be gone.
 	if err := p.virsh(context.Background(), cluster, true, "detach-disk", dom, "sdb"); err != nil {
 		t.Fatalf("detach: %v", err)
 	}
-	disks, _, err = p.domainDisks(context.Background(), dom)
+	set, err = p.domainDisks(context.Background(), dom)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(disks) != 0 {
-		t.Fatalf("domainDisks after detach = %v, want empty", disks)
+	if len(set.ByWWN) != 0 {
+		t.Fatalf("domainDisks after detach = %v, want empty", set.ByWWN)
 	}
 }

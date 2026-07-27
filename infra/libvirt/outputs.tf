@@ -1,8 +1,9 @@
 # The cluster's dedicated network - name/bridge/CIDR/mode, for `tofu output` and debugging.
+# The bridge name is libvirt's to choose (virbrN), so it is only known once the network exists.
 output "network" {
   value = {
     name   = libvirt_network.cluster.name
-    bridge = libvirt_network.cluster.bridge
+    bridge = try(libvirt_network.cluster.bridge.name, "")
     cidr   = var.network_cidr
     mode   = var.network_mode
   }
@@ -16,8 +17,12 @@ output "nodes" {
     # libvirt domain name - the Go wrapper matches nodes back to specs by this.
     for k, d in libvirt_domain.node : k => {
       name = k
-      ip   = try(d.network_interface[0].addresses[0], "")
-      mac  = try(d.network_interface[0].mac, "")
+      # The lease query reports every address on every interface; a node has one interface on one
+      # subnet, so the first IPv4 it holds is the node IP. Empty rather than an error if the lease
+      # has gone (a powered-off node being repaired) - the provisioner treats a missing IP as
+      # not-yet-observed, which is exactly what it is.
+      ip  = try([for a in data.libvirt_domain_interface_addresses.node[k].interfaces[0].addrs : a.addr if a.type == "ipv4"][0], "")
+      mac = local.node_mac[k]
       # Each extra disk's guest identity, as a hex TOKEN that appears in the /dev/disk/by-id/ symlink
       # udev creates for it - here "5000c50…", which lands in /dev/disk/by-id/wwn-0x5000c50… . The
       # node_disks role resolves the device by matching this token rather than by an exact path, so
@@ -32,7 +37,7 @@ output "nodes" {
 }
 
 # Where each extra disk's volume actually lives, and the identity to attach it under. Consumed by the
-# Go wrapper's hot-attach step (internal/provision/tofu.attachDisks): the domain's `disk` blocks are
+# Go wrapper's hot-attach step (internal/provision/tofu.attachDisks): the domain's device list is
 # ignore_changes'd, so adding a disk to a LIVE node is done with virsh, which needs the volume path.
 # Keyed "<node>/<disk>", matching local.extra_disks.
 output "extra_disks" {
@@ -41,7 +46,7 @@ output "extra_disks" {
       node   = v.node
       name   = v.name
       wwn    = v.wwn
-      volume = libvirt_volume.extra[k].id # the pool path, e.g. /var/lib/libvirt/images/…qcow2
+      volume = libvirt_volume.extra[k].path # the pool path, e.g. /var/lib/libvirt/images/…qcow2
     }
   }
 }

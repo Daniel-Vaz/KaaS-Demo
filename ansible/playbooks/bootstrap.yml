@@ -8,7 +8,7 @@
 # --control-plane-endpoint (uploading certs), and the remaining nodes join as control planes.
 # On a golden image the `common` role is a near no-op.
 #
-# Every play here targets a VM tofu JUST created: `wait_for_lease` only confirms a DHCP lease, not
+# Every play here targets a VM tofu JUST created: `wait_for_ip` only confirms a DHCP lease, not
 # that cloud-init has finished bringing up sshd, so connecting immediately can hit a transient
 # "Connection refused". Each play opens with `wait_for_connection` before anything else, including
 # fact-gathering (needed by the loadbalancer role's keepalived template).

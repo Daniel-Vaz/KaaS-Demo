@@ -82,8 +82,11 @@ func (p *Provisioner) ReplaceNode(ctx context.Context, clusterID, vmName string)
 		fmt.Sprintf("libvirt_domain.node[%q]", vmName),
 		fmt.Sprintf("libvirt_volume.node[%q]", vmName),
 		// The cloud-init disk is per-node and cheap; re-creating it alongside guarantees the rebuilt
-		// domain gets a freshly rendered config rather than a stale one from a previous shape.
+		// domain gets a freshly rendered config rather than a stale one from a previous shape. It is
+		// two resources: the rendered ISO, and the pool volume that uploads it for the hypervisor to
+		// read (see infra/libvirt/main.tf).
 		fmt.Sprintf("libvirt_cloudinit_disk.node[%q]", vmName),
+		fmt.Sprintf("libvirt_volume.cloudinit[%q]", vmName),
 	}
 	// Same ordering contract as EnsureNodes, and it bites harder here: apply is about to destroy this
 	// domain, and a domain destroyed while an extra disk is attached leaves tofu holding a volume
@@ -106,14 +109,14 @@ func (p *Provisioner) ReplaceNode(ctx context.Context, clusterID, vmName string)
 // already gone, or a disk already detached, is the state we are trying to reach.
 func (p *Provisioner) detachDisksForNode(ctx context.Context, clusterID, vmName string) error {
 	dom := clusterID + "-" + vmName
-	attached, running, err := p.domainDisks(ctx, dom)
+	set, err := p.domainDisks(ctx, dom)
 	if err != nil {
 		// No such domain - the VM is already gone, which is a legitimate way to arrive at a repair
 		// (something destroyed it out of band). Nothing to detach; let apply re-create it.
 		return nil
 	}
-	for wwn, target := range attached {
-		if err := p.virsh(ctx, clusterID, running, "detach-disk", dom, target); err != nil {
+	for wwn, target := range set.ByWWN {
+		if err := p.virsh(ctx, clusterID, set.Running, "detach-disk", dom, target); err != nil {
 			return fmt.Errorf("detach %s (%s): %w", target, wwn, err)
 		}
 	}

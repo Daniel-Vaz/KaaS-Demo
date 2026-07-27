@@ -51,3 +51,20 @@ func TestListManagedIgnoresNonWorkspaceDirs(t *testing.T) {
 		t.Fatalf("ListManaged = %v, want only the real workspace [abc123deadbeef01]; shell/kube must be excluded", managed)
 	}
 }
+
+// TestFreeTargetAvoidsTheCloudInitCDROM pins the reason freeTarget is given EVERY target device
+// rather than only the wwn-bearing ones: the module declares the cloud-init CD-ROM at sda, and
+// libvirt refuses an attach onto a device that already exists ("target sda already exists"). It also
+// pins that the first hot-attached disk lands on sdb - the same device the module declares it at
+// when a node is created or rebuilt, so the two paths converge on the same layout.
+func TestFreeTargetAvoidsTheCloudInitCDROM(t *testing.T) {
+	// A freshly created node: virtio root at vda, cloud-init CD-ROM at sda, no extra disks yet.
+	used := map[string]bool{"vda": true, "sda": true}
+	if got := freeTarget(used); got != "sdb" {
+		t.Fatalf("freeTarget = %q, want sdb - sda is the cloud-init CD-ROM", got)
+	}
+	used["sdb"] = true
+	if got := freeTarget(used); got != "sdc" {
+		t.Fatalf("freeTarget = %q, want sdc", got)
+	}
+}

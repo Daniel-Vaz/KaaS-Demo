@@ -15,12 +15,14 @@ import (
 // Extra-disk ATTACHMENT on libvirt is converged here rather than by OpenTofu - the one piece of
 // infrastructure this backend does not express as a resource.
 //
-// The reason is a provider quirk: dmacvicar/libvirt marks libvirt_domain's `disk` ForceNew at the
-// LIST level, so adding or removing a disk block changes `disk.#` and REPLACES the whole domain.
-// Taken literally, "attach a disk to this worker" would instead destroy the worker, wipe its root
-// disk and reschedule its pods. So the module declares the disks (a domain created fresh, or rebuilt
-// by an OS roll, comes up with its full set) but marks `disk` ignore_changes, and the live delta is
-// applied with virsh.
+// The reason is that OpenTofu can only converge a domain's device list by REDEFINING the domain,
+// which writes libvirt's PERSISTENT XML and nothing else: the running QEMU process neither gains nor
+// loses the device until the node is rebooted. Taken literally, "attach a disk to this worker" would
+// appear to succeed and then do nothing until something else restarted the VM - and, on the older
+// 0.8 provider, worse: it marked the disk list ForceNew, so the attach destroyed and rebuilt the
+// worker. So the module declares the disks (a domain created fresh, or rebuilt by an OS roll, comes
+// up with its full set) but marks its device list ignore_changes, and the live delta is applied with
+// `virsh attach-disk --live --persistent`, which updates both copies at once.
 //
 // The ordering around `apply` is load-bearing, and getting it wrong wedges the cluster:
 //
@@ -66,6 +68,21 @@ type libvirtDomain struct {
 	} `xml:"devices"`
 }
 
+// domainDiskSet is what one `virsh dumpxml` tells this package about a node's disks.
+//
+// The two maps answer different questions and must stay separate. ByWWN is the EXTRA disks only,
+// keyed on the identity the platform minted - that is the set this code owns, and keying on the wwn
+// is what makes the detach paths structurally unable to touch the boot device (it carries none).
+// UsedTargets is EVERY disk's target device, including the ones this code does not own: the virtio
+// root disk and the cloud-init CD-ROM the module declares at sda. A free target must be picked
+// against that wider set, or the first hot-attached disk lands on the CD-ROM's device and libvirt
+// refuses it ("target sda already exists").
+type domainDiskSet struct {
+	ByWWN       map[string]string // wwn (normalised) → target device, extra disks only
+	UsedTargets map[string]bool   // every target device the domain currently has
+	Running     bool
+}
+
 // detachRemovedDisks runs BEFORE apply. It compares what the LAST apply left attached (the module's
 // `extra_disks` output - apply has not changed it yet, so a just-removed disk is still listed there)
 // against what each node still desires, and detaches the difference while the volumes still exist.
@@ -100,18 +117,18 @@ func (p *Provisioner) detachRemovedDisks(ctx context.Context, clusterID, ws stri
 			continue
 		}
 		dom := domainNameFor(clusterID, node)
-		attached, running, err := p.domainDisks(ctx, dom)
+		set, err := p.domainDisks(ctx, dom)
 		if err != nil {
 			// The domain may already be gone (a node also being scaled away this tick), in which case
 			// tofu will destroy its volume alongside it - nothing to detach.
 			continue
 		}
 		for _, d := range stale {
-			target, ok := attached[normalizeWWN(d.WWN)]
+			target, ok := set.ByWWN[normalizeWWN(d.WWN)]
 			if !ok {
 				continue // already detached (a retried tick)
 			}
-			if err := p.virsh(ctx, clusterID, running, "detach-disk", dom, target); err != nil {
+			if err := p.virsh(ctx, clusterID, set.Running, "detach-disk", dom, target); err != nil {
 				return fmt.Errorf("detach disk %q from %s: %w", d.Name, node, err)
 			}
 			p.run.Emit(clusterID, "info", fmt.Sprintf("node %s: detached disk %q at %s", node, d.Name, target))
@@ -140,7 +157,7 @@ func (p *Provisioner) attachNewDisks(ctx context.Context, clusterID, ws string, 
 		want := cur[node]
 		sort.Slice(want, func(i, j int) bool { return want[i].Name < want[j].Name })
 		dom := domainNameFor(clusterID, node)
-		attached, running, err := p.domainDisks(ctx, dom)
+		set, err := p.domainDisks(ctx, dom)
 		if err != nil {
 			// The domain may legitimately not be readable yet (created later in this same apply, or
 			// mid-boot). Converge on a later tick rather than failing the whole step.
@@ -148,15 +165,16 @@ func (p *Provisioner) attachNewDisks(ctx context.Context, clusterID, ws string, 
 			continue
 		}
 		for _, d := range want {
-			if _, have := attached[normalizeWWN(d.WWN)]; have {
+			if _, have := set.ByWWN[normalizeWWN(d.WWN)]; have {
 				continue // already attached - the converged, no-op case
 			}
-			target := freeTarget(attached)
-			if err := p.virsh(ctx, clusterID, running, "attach-disk", dom, d.Volume, target,
+			target := freeTarget(set.UsedTargets)
+			if err := p.virsh(ctx, clusterID, set.Running, "attach-disk", dom, d.Volume, target,
 				"--subdriver", "qcow2", "--targetbus", "scsi", "--wwn", d.WWN); err != nil {
 				return fmt.Errorf("attach disk %q to %s: %w", d.Name, node, err)
 			}
-			attached[normalizeWWN(d.WWN)] = target
+			set.ByWWN[normalizeWWN(d.WWN)] = target
+			set.UsedTargets[target] = true
 			p.run.Emit(clusterID, "info", fmt.Sprintf("node %s: attached disk %q at %s", node, d.Name, target))
 		}
 	}
@@ -177,14 +195,14 @@ func (p *Provisioner) detachExtraDisksBeforeDestroy(ctx context.Context, cluster
 		return // virsh unavailable, or nothing provisioned - let tofu destroy proceed
 	}
 	for _, dom := range doms {
-		attached, running, err := p.domainDisks(ctx, dom)
+		set, err := p.domainDisks(ctx, dom)
 		if err != nil {
 			continue
 		}
-		for _, target := range attached {
+		for _, target := range set.ByWWN {
 			// Best-effort each - the point is to leave the domain XML (both the live and the
 			// persistent copy tofu might refresh from) free of a disk whose volume is being deleted.
-			if err := p.virsh(ctx, clusterID, running, "detach-disk", dom, target); err != nil {
+			if err := p.virsh(ctx, clusterID, set.Running, "detach-disk", dom, target); err != nil {
 				p.run.Emit(clusterID, "warn", fmt.Sprintf("pre-destroy: could not detach %s from %s: %v", target, dom, err))
 			}
 		}
@@ -226,32 +244,36 @@ func (p *Provisioner) moduleDisks(ctx context.Context, ws, clusterID string) (ma
 	return byNode, nil
 }
 
-// domainDisks returns the domain's currently-attached EXTRA disks (wwn → target device) and whether
-// it is running. The root disk carries no wwn and so is never in the map - which is what makes the
-// detach paths unable to touch the boot device.
-func (p *Provisioner) domainDisks(ctx context.Context, dom string) (map[string]string, bool, error) {
+// domainDisks reads one domain's disks: its EXTRA disks by wwn, every target device in use, and
+// whether it is running. Disks with no wwn (the root disk, the cloud-init CD-ROM) are counted in
+// UsedTargets but never in ByWWN - see domainDiskSet.
+func (p *Provisioner) domainDisks(ctx context.Context, dom string) (domainDiskSet, error) {
 	// silent: this is a probe whose failure is expected and handled by the caller, and whose stdout
 	// is a domain's whole XML - neither belongs in the cluster's event timeline.
 	out, err := procstream.Capture(ctx, "", nil, silent, "virsh", "-c", p.cfg.LibvirtURI, "dumpxml", dom)
 	if err != nil {
-		return nil, false, err
+		return domainDiskSet{}, err
 	}
 	var d libvirtDomain
 	if err := xml.Unmarshal(out, &d); err != nil {
-		return nil, false, fmt.Errorf("parse domain xml: %w", err)
+		return domainDiskSet{}, fmt.Errorf("parse domain xml: %w", err)
 	}
-	disks := map[string]string{}
+	set := domainDiskSet{ByWWN: map[string]string{}, UsedTargets: map[string]bool{}}
 	for _, disk := range d.Devices.Disks {
-		if disk.WWN == "" {
-			continue // the root disk
+		if disk.Target.Dev != "" {
+			set.UsedTargets[disk.Target.Dev] = true
 		}
-		disks[normalizeWWN(disk.WWN)] = disk.Target.Dev
+		if disk.WWN == "" {
+			continue // the root disk, or the cloud-init CD-ROM
+		}
+		set.ByWWN[normalizeWWN(disk.WWN)] = disk.Target.Dev
 	}
 	state, err := procstream.Capture(ctx, "", nil, silent, "virsh", "-c", p.cfg.LibvirtURI, "domstate", dom)
 	if err != nil {
-		return nil, false, err
+		return domainDiskSet{}, err
 	}
-	return disks, strings.TrimSpace(string(state)) == "running", nil
+	set.Running = strings.TrimSpace(string(state)) == "running"
+	return set, nil
 }
 
 // listClusterDomains returns the libvirt domains belonging to a cluster - every domain whose name
@@ -285,13 +307,13 @@ func (p *Provisioner) virsh(ctx context.Context, clusterID string, running bool,
 	return procstream.Run(ctx, "", nil, p.run.EmitFor(clusterID), "virsh", full...)
 }
 
-// freeTarget picks a SCSI target device name not already in use. The root disk is virtio (vda), so
-// the whole sdX range is free; taken is the wwn→target map of what is already attached.
-func freeTarget(taken map[string]string) string {
-	used := map[string]bool{}
-	for _, t := range taken {
-		used[t] = true
-	}
+// freeTarget picks a target device name the domain is not already using. It is given EVERY target,
+// not just the extra disks': the root disk is virtio (vda) and so out of the way, but the module
+// declares the cloud-init CD-ROM at sda, and libvirt rejects an attach onto a device already present
+// ("target sda already exists"). So the first extra disk lands on sdb - which is also exactly where
+// the module puts it when it declares the disks on a freshly created domain, so the two paths agree
+// without sharing any state.
+func freeTarget(used map[string]bool) string {
 	for c := byte('a'); c <= 'z'; c++ {
 		if t := "sd" + string(c); !used[t] {
 			return t

@@ -24,11 +24,12 @@ import (
 	"github.com/Daniel-Vaz/KaaS-demo/internal/provision/tofurunner"
 )
 
-// ImageStager makes a golden image available as a volume in the hypervisor's storage pool, so the
-// module can clone from it by name instead of importing it through OpenTofu. Satisfied by
-// *kvmhost.Host; nil for a local hypervisor, where the provider imports images itself.
+// ImageStager makes a golden image available as a volume in the hypervisor's storage pool and
+// reports the path it lives at there, so the module can back node volumes onto it directly instead
+// of importing it through OpenTofu. Satisfied by *kvmhost.Host; nil for a local hypervisor, where
+// the provider imports images itself.
 type ImageStager interface {
-	StageImage(ctx context.Context, pool, name, localPath string, emit func(string)) error
+	StageImage(ctx context.Context, pool, name, localPath string, emit func(string)) (string, error)
 }
 
 type Config struct {
@@ -40,8 +41,8 @@ type Config struct {
 	BaseImage  string // fallback base/golden qcow2 (used when a node's image isn't in ImageDir)
 	ImageDir   string // optional dir of per-(OS,k8s) golden images (see catalog.GoldenImageName)
 	// Stager, when set (a remote KVM host), uploads each golden image into the hypervisor's pool ONCE
-	// and has the module clone it by name - instead of the provider importing it per cluster, which a
-	// slow link cannot do inside its fixed 20m volume-create timeout. See kvmhost.StageImage.
+	// and has the module back node volumes onto it there - instead of the provider streaming it over
+	// the libvirt connection once per cluster. See kvmhost.StageImage.
 	Stager       ImageStager
 	SSHPublicKey string       // injected via cloud-init
 	Events       events.Sink  // optional; streams tofu output as events
@@ -117,12 +118,14 @@ func (p *Provisioner) EnsureNodes(ctx context.Context, clusterID string, netSpec
 	if err != nil {
 		return nil, fmt.Errorf("tofu: %w", err)
 	}
-	// With a remote hypervisor the images must already be in its pool before apply - the module
-	// clones them by name and imports nothing. Idempotent, and the only slow part of a first run.
-	if err := p.stageImages(ctx, clusterID, specs); err != nil {
+	// With a remote hypervisor the images must already be in its pool before apply - the module backs
+	// node volumes onto them by path and imports nothing. Idempotent, and the only slow part of a
+	// first run. Locally this is a no-op and the map comes back empty.
+	staged, err := p.stageImages(ctx, clusterID, specs)
+	if err != nil {
 		return nil, err
 	}
-	if err := p.run.WriteVars(ws, p.vars(clusterID, netSpec, specs)); err != nil {
+	if err := p.run.WriteVars(ws, p.vars(clusterID, netSpec, specs, staged)); err != nil {
 		return nil, fmt.Errorf("tofu: write vars: %w", err)
 	}
 	// Extra-disk attachment is converged out of band (the module marks the domain's disk list
@@ -159,21 +162,29 @@ func (p *Provisioner) ListManaged(ctx context.Context) ([]string, error) {
 	return p.run.ListManaged(ctx)
 }
 
-func (p *Provisioner) vars(clusterID string, netSpec provision.NetworkSpec, specs []provision.NodeSpec) tfvars {
+// vars renders the module's inputs. staged maps a LOCAL golden-image path to the path the same image
+// occupies in the hypervisor's pool; it is empty for a local hypervisor, where the images the module
+// sees are the local paths and the provider imports them itself.
+func (p *Provisioner) vars(clusterID string, netSpec provision.NetworkSpec, specs []provision.NodeSpec, staged map[string]string) tfvars {
 	mode := netSpec.Mode
 	if mode == "" {
 		mode = "nat"
 	}
+	// In preloaded mode every image the module is handed must be a path IN THE POOL, since that is
+	// what a node's root volume backs onto. remote() does that translation; locally it is identity.
+	remote := func(local string) string {
+		if p, ok := staged[local]; ok {
+			return p
+		}
+		return local
+	}
 	v := tfvars{
-		ClusterName: clusterID,
-		LibvirtURI:  p.cfg.LibvirtURI,
-		Pool:        p.cfg.Pool,
-		NetworkCIDR: netSpec.CIDR,
-		NetworkMode: mode,
-		BaseImage:   p.cfg.BaseImage,
-		// The image paths below are still paths; in preloaded mode the module takes their basename,
-		// which is exactly the volume name stageImages staged them under. So one set of values serves
-		// both modes and the fallback logic underneath stays untouched.
+		ClusterName:      clusterID,
+		LibvirtURI:       p.cfg.LibvirtURI,
+		Pool:             p.cfg.Pool,
+		NetworkCIDR:      netSpec.CIDR,
+		NetworkMode:      mode,
+		BaseImage:        remote(p.cfg.BaseImage),
 		PreloadedImages:  p.cfg.Stager != nil,
 		SSHAuthorizedKey: strings.TrimSpace(p.cfg.SSHPublicKey),
 	}
@@ -193,6 +204,11 @@ func (p *Provisioner) vars(clusterID string, netSpec provision.NetworkSpec, spec
 		for _, d := range s.Disks {
 			disks = append(disks, tfvDisk{Name: d.Name, SizeGB: d.SizeGB, WWN: d.WWN})
 		}
+		// An unresolved image stays empty so the module applies its own base_image fallback; a
+		// resolved one is translated to the hypervisor's copy when there is one.
+		if img != "" {
+			img = remote(img)
+		}
 		v.Nodes = append(v.Nodes, tfvNode{
 			Name: s.VMName, Role: string(s.Role), CPUs: s.CPUs, MemMB: s.MemMB, DiskGB: s.DiskGB,
 			Image: img, ExtraDisks: disks,
@@ -202,34 +218,35 @@ func (p *Provisioner) vars(clusterID string, netSpec provision.NetworkSpec, spec
 }
 
 // stageImages uploads every distinct golden image this cluster's nodes need into the hypervisor's
-// storage pool, so the module can clone them by name. A no-op without a Stager (the local
-// hypervisor, where the provider imports images itself over the unix socket).
+// storage pool, and returns local path → hypervisor path for each. A no-op without a Stager (the
+// local hypervisor, where the provider imports images itself over the unix socket), which returns an
+// empty map - and an empty map is what makes vars' translation the identity there.
 //
 // Each image is staged once for the whole platform, not once per cluster: the second cluster to use
 // an image finds it already there and provisions with no upload at all. Idempotent, so a reconcile
 // retry after a failed/killed upload simply resumes the work by redoing it.
-func (p *Provisioner) stageImages(ctx context.Context, clusterID string, specs []provision.NodeSpec) error {
+func (p *Provisioner) stageImages(ctx context.Context, clusterID string, specs []provision.NodeSpec) (map[string]string, error) {
 	if p.cfg.Stager == nil {
-		return nil
+		return nil, nil
 	}
-	seen := map[string]bool{}
+	staged := map[string]string{}
 	for _, s := range specs {
 		path := p.resolveImage(s.Image)
 		if path == "" {
 			path = p.cfg.BaseImage // same fallback the module applies to an empty node image
 		}
-		if seen[path] {
+		if _, done := staged[path]; done {
 			continue
 		}
-		seen[path] = true
-		// The volume name must match what the module clones from: basename(image path).
-		if err := p.cfg.Stager.StageImage(ctx, p.cfg.Pool, filepath.Base(path), path, func(line string) {
+		remote, err := p.cfg.Stager.StageImage(ctx, p.cfg.Pool, filepath.Base(path), path, func(line string) {
 			p.run.Emit(clusterID, "info", line)
-		}); err != nil {
-			return fmt.Errorf("tofu: stage golden image: %w", err)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("tofu: stage golden image: %w", err)
 		}
+		staged[path] = remote
 	}
-	return nil
+	return staged, nil
 }
 
 // resolveImage maps a node's golden-image name (catalog.GoldenImageName, e.g.

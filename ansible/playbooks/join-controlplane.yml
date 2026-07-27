@@ -13,7 +13,7 @@
 # <VIP>:8443. vrrp_router_id/vrrp_password are deterministic from the cluster (same values
 # InitControlPlane used), so the replacement node's config matches its still-running peers.
 #
-# The replacement node was just (re)created: tofu's wait_for_lease only confirms a DHCP lease, not
+# The replacement node was just (re)created: tofu's wait_for_ip only confirms a DHCP lease, not
 # that cloud-init has finished bringing up sshd, so connecting immediately can hit a transient
 # "Connection refused". wait_for_connection blocks until it genuinely accepts SSH before anything
 # else (including fact gathering, needed by the loadbalancer role) runs.

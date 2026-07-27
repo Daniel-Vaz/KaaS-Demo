@@ -9,7 +9,7 @@
 #
 # Idempotent: guarded by /etc/kubernetes/restore.done so a retry after success is a no-op.
 #
-# The replacement node was just (re)created: tofu's wait_for_lease only confirms a DHCP lease, not
+# The replacement node was just (re)created: tofu's wait_for_ip only confirms a DHCP lease, not
 # that cloud-init has finished bringing up sshd, so connecting immediately can hit a transient
 # "Connection refused". wait_for_connection blocks until it genuinely accepts SSH before anything
 # else runs.

@@ -26,13 +26,13 @@ variable "network_mode" {
 
 variable "base_image" {
   type        = string
-  description = "Fallback base/golden qcow2 for any node with no per-node image. A path/URL where OpenTofu runs when preloaded_images is false; a volume name already in `pool` when it is true."
+  description = "Fallback base/golden qcow2 for any node with no per-node image. A path/URL where OpenTofu runs when preloaded_images is false; a path to a volume already in `pool` on the hypervisor when it is true."
 }
 
 variable "preloaded_images" {
   type        = bool
   default     = false
-  description = "When true, `base_image`/`nodes[].image` name volumes that ALREADY exist in `pool` on the hypervisor (staged out-of-band by the provisioner) and nodes clone from them directly - nothing is uploaded through OpenTofu. Set for a remote KVM host, where importing a multi-GB image through the provider cannot finish inside its fixed 20m volume-create timeout. When false (local libvirt), the module imports each image from the given path itself."
+  description = "When true, `base_image`/`nodes[].image` are paths to volumes that ALREADY exist in `pool` ON THE HYPERVISOR (staged out-of-band by the provisioner, which reports back where it put them) and node root volumes back onto them directly - nothing is uploaded through OpenTofu. Set for a remote KVM host, where the provider's per-cluster import would stream a multi-GB image over the libvirt connection every time. When false (local libvirt), the paths are local to the machine running OpenTofu and the module imports each image itself."
 }
 
 variable "ssh_authorized_key" {
