@@ -16,3 +16,24 @@
     - name: Pre-pull kubeadm control-plane images
       ansible.builtin.command: "kubeadm config images pull --kubernetes-version {{ k8s_version }}"
       changed_when: true
+
+    # NOTE - do not rebuild the initramfs here. A node's initramfs DHCPs the NIC early (Ubuntu 26.04
+    # builds it with dracut, whose network module runs systemd-networkd inside the initramfs with
+    # ClientIdentifier=mac); the real root's networkd then DHCPs AGAIN under its default DUID client
+    # id, dnsmasq treats that as a new client, and the node ends up holding TWO leases on one MAC.
+    # That breaks libvirt provisioning outright: the module reads a node's IP from the lease table
+    # (the only source available without a guest agent), gets the stale first lease, and every node
+    # hangs its first Ansible task on an unreachable address.
+    #
+    # The tempting fix is to take the network modules out of the initramfs at their source - the root
+    # filesystem is a local disk clone, so the initramfs never needs the network. It is not worth it:
+    # `dracut --regenerate-all --force` REPLACES the image's working initramfs, and if that produces
+    # an unusable one the failure is a kernel panic at boot ("VFS: Unable to mount root fs") with no
+    # network to debug it over - and the platform reports only `wait_for_ip` timing out 300s later.
+    # A golden image that does not boot is a far worse failure than a spurious DHCP lease.
+    #
+    # So the duplicate lease is fixed entirely GUEST-SIDE, one layer up: the libvirt module's
+    # cloud-init `network_config` pins `dhcp-identifier: mac`, which makes the real networkd reuse the
+    # initramfs's `01:<mac>` lease instead of asking for a second one. See infra/libvirt/main.tf. If
+    # the initramfs ever does need silencing, the safe lever is the kernel command line (`ip=none
+    # rd.neednet=0` via /etc/default/grub + update-grub), which leaves the initramfs itself untouched.

@@ -184,7 +184,29 @@ resource "libvirt_cloudinit_disk" "node" {
     instance-id: ${var.cluster_name}-${each.value.name}
     local-hostname: ${each.value.name}
   EOT
-  user_data = <<-EOT
+  # DHCP the single NIC with the MAC as the client identifier - load-bearing, not cosmetic.
+  #
+  # Our golden image (Ubuntu, systemd-networkd) brings the NIC up TWICE during boot: dracut's
+  # initramfs network does an early DHCP with ClientIdentifier=mac (dnsmasq records the lease under
+  # `01:<mac>`), then the real networkd re-DHCPs from this config. netplan's default identifier is
+  # `duid`, so without the line below networkd sends a DIFFERENT client id - dnsmasq treats it as a
+  # new client and hands out a SECOND, different lease, and the guest binds that one. The node then
+  # holds two valid leases on one MAC. The module reads the node IP from the `lease` source (the only
+  # source this provider offers besides a guest agent we don't run), which returns BOTH, stale first,
+  # so the `nodes` output reports the dead lease and every node hangs the first Ansible task on an SSH
+  # connect that never answers. Pinning `dhcp-identifier: mac` makes networkd reuse dracut's `01:<mac>`
+  # lease, so there is exactly one lease and it is the bound one. Match by MAC (we mint it) rather than
+  # by interface name so this is independent of the guest's NIC naming.
+  network_config = <<-EOT
+    version: 2
+    ethernets:
+      primary:
+        match:
+          macaddress: "${local.node_mac[each.key]}"
+        dhcp4: true
+        dhcp-identifier: mac
+  EOT
+  user_data      = <<-EOT
     #cloud-config
     hostname: ${each.value.name}
     fqdn: ${each.value.name}
@@ -200,11 +222,20 @@ resource "libvirt_cloudinit_disk" "node" {
   EOT
 }
 
+#
+# The declared format must be `iso`, not `raw`, and that is load-bearing rather than cosmetic: libvirt
+# PROBES an uploaded volume's content and records what it finds, so a volume created from a NoCloud
+# ISO comes back from the pool as `<format type='iso'/>` whatever we asked for. The provider writes
+# that observed value into state, so a config saying `raw` is permanently drifted - and since volumes
+# refuse every update ("Storage volumes cannot be updated"), the SECOND apply on any workspace fails
+# outright. That is fatal here, because the reconcile loop applies on every tick: the first apply
+# would create the cluster and every apply after it would error. Declaring what libvirt will report
+# keeps the resource converged.
 resource "libvirt_volume" "cloudinit" {
   for_each = local.nodes
   name     = "${var.cluster_name}-${each.value.name}-cloudinit.iso"
   pool     = var.pool
-  target   = { format = { type = "raw" } }
+  target   = { format = { type = "iso" } }
   create   = { content = { url = libvirt_cloudinit_disk.node[each.key].path } }
 }
 
@@ -282,6 +313,20 @@ resource "libvirt_domain" "node" {
       model = "virtio-scsi"
     }]
 
+    # A virtio-serial channel for the QEMU guest agent (baked into the golden image). The agent is
+    # udev-activated when this channel appears, so a node boots able to answer host-side queries. We
+    # deliberately keep the `nodes` output reading the node IP from the DHCP LEASE, not the agent (see
+    # that data source): the lease source returns "" for a powered-off node, which the repair ladder
+    # relies on, whereas the agent source ERRORS when the agent is unreachable and would fail the
+    # whole cluster's refresh for one down node. The channel earns its keep elsewhere - agent-driven
+    # graceful shutdown / fsfreeze, `virsh domifaddr --source agent` for debugging, parity with the
+    # Proxmox image, and a trivial future opt-in. Like the disks/controllers it only lands when the
+    # domain is created (devices is ignore_changes'd), so existing clusters are untouched until rebuilt.
+    channels = [{
+      source = { unix = { mode = "bind" } }
+      target = { virt_io = { name = "org.qemu.guest_agent.0" } }
+    }]
+
     interfaces = [{
       mac    = { address = local.node_mac[each.key] }
       model  = { type = "virtio" }
@@ -335,10 +380,16 @@ resource "libvirt_domain" "node" {
   }
 }
 
-# Each node's DHCP lease, read back for the `nodes` output. 0.8 exposed the addresses on the domain
+# Each node's address, read back for the `nodes` output. 0.8 exposed the addresses on the domain
 # itself; 0.9 splits the query off into its own data source (lifecycle vs. query - a resource creates
 # and destroys, a data source observes), which is also why it can be read on a later refresh without
 # touching the domain.
+#
+# source = "lease" is the only usable option here: this provider offers "lease", "agent" and "any"
+# (which is lease-or-agent), and we run no guest agent in the kvm golden image. That makes it
+# essential that each node holds exactly ONE lease - which is what the cloud-init network_config's
+# `dhcp-identifier: mac` guarantees. Without it the guest holds two leases on its single MAC and the
+# output below (addrs[0]) reports the wrong one; see the long note on that resource.
 data "libvirt_domain_interface_addresses" "node" {
   for_each = local.nodes
   domain   = libvirt_domain.node[each.key].name

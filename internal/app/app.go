@@ -96,16 +96,29 @@ type App struct {
 	// across tenants. Grants can't be set while it is on (updateUserLocked rejects them), and the
 	// Admin page shows per-user consumption of the shared pool rather than a grant editor.
 	SharedQuota bool
-	Catalog     *catalog.Catalog
-	Rec         *reconcile.Reconciler
-	Shell       shell.Backend      // in-browser cluster terminal: fake (in-process) or worker-proxy
-	NodeSSH     nodessh.Backend    // in-browser node SSH (Nodes tab): fake (in-process) or node-ssh-sandbox proxy
-	Kube        kube.Client        // Workloads page query seam: fake (synthesized) or worker-proxied kubectl
-	Monitor     monitoring.Querier // Monitoring page query seam: fake (synthesized) or worker-proxied PromQL
-	Security    security.Querier   // Security page query seam: fake (synthesized) or worker-proxied Trivy CRD reads
-	Audit       audit.Querier      // Audit tab query seam: fake (synthesized) or worker-proxied apiserver-log reads
-	Tunnel      tunnel.Proxier     // Monitoring "Open UI" links: fake (landing page) or worker-proxied HTTP to in-cluster UIs
-	Values      values.Provider    // add-on Helm values source for the editor: fake (synthesized) or helm show values
+	// BundleAddonsOptional (KAAS_BUNDLE_ADDONS_OPTIONAL) lets a create request DESELECT the add-ons
+	// that ship with the chosen bundle. Off (the default) a cluster is always born with the whole
+	// batteries-included set and an add-on can only be removed once it is Ready - the add-on tab's
+	// behaviour is unchanged either way, this governs admission only (see resolveAddons).
+	//
+	// It exists because the bundle is sized for a real host, not a laptop: kube-prometheus-stack,
+	// Longhorn, Cilium, trivy-operator and the gateway pair together outweigh a small cluster's
+	// workers on a local KVM host, and installing them all is what tips such a cluster over. The
+	// platform tolerates their absence already (every wiring step gates on its add-on being
+	// installed - reconcileGatewayWiring, reconcileMonitoringWiring, reconcileVaultWiring, the DNS
+	// wiring, and the per-worker Longhorn disk is only provisioned when longhorn is on the cluster),
+	// so this only lifts the admission-time lock, it adds no new tolerance.
+	BundleAddonsOptional bool
+	Catalog              *catalog.Catalog
+	Rec                  *reconcile.Reconciler
+	Shell                shell.Backend      // in-browser cluster terminal: fake (in-process) or worker-proxy
+	NodeSSH              nodessh.Backend    // in-browser node SSH (Nodes tab): fake (in-process) or node-ssh-sandbox proxy
+	Kube                 kube.Client        // Workloads page query seam: fake (synthesized) or worker-proxied kubectl
+	Monitor              monitoring.Querier // Monitoring page query seam: fake (synthesized) or worker-proxied PromQL
+	Security             security.Querier   // Security page query seam: fake (synthesized) or worker-proxied Trivy CRD reads
+	Audit                audit.Querier      // Audit tab query seam: fake (synthesized) or worker-proxied apiserver-log reads
+	Tunnel               tunnel.Proxier     // Monitoring "Open UI" links: fake (landing page) or worker-proxied HTTP to in-cluster UIs
+	Values               values.Provider    // add-on Helm values source for the editor: fake (synthesized) or helm show values
 	// Vault is the HashiCorp Vault seam: fake (in-memory) or the real net/http client. On the API it
 	// carries only the narrow minter token (VaultSession, the "View in Vault" handoff); the reconciler
 	// holds the same interface with the management token for provisioning and access sync. Never nil.
@@ -328,6 +341,7 @@ func New(log *slog.Logger) (*App, error) {
 	log.Info("providers selected",
 		"infra_providers", strings.Join(infraProviders, ","),
 		"shared_quota", envBool("KAAS_SHARED_QUOTA", false),
+		"bundle_addons_optional", envBool("KAAS_BUNDLE_ADDONS_OPTIONAL", false),
 		"provisioner", getenv("KAAS_PROVISIONER", "fake"),
 		"config", getenv("KAAS_CONFIG", "fake"),
 		"addons", getenv("KAAS_ADDONS", "fake"),
@@ -378,21 +392,25 @@ func New(log *slog.Logger) (*App, error) {
 		Catalog:         cat,
 		ProviderBudgets: providerBudgets,
 		SharedQuota:     envBool("KAAS_SHARED_QUOTA", false),
-		Rec:             rec,
-		kvm:             kvm,
-		Shell:           shellBackend,
-		NodeSSH:         nodeSSHBackend,
-		Kube:            kubeClient,
-		Monitor:         monitorQuerier,
-		Security:        securityQuerier,
-		Audit:           auditQuerier,
-		Tunnel:          tunnelProxier,
-		Values:          valuesProvider,
-		Vault:           vaultMgr,
-		vaultSettings:   vaultSettings,
-		InfraProviders:  infraProviders,
-		sharedNet:       sharedNet,
-		dns:             dnsSettings,
+		// Off = the bundle's add-ons are locked on at create time (they can still be removed from a
+		// Ready cluster). On = the create wizard lets them be deselected, for a host that can't
+		// carry the whole batteries-included set. See App.BundleAddonsOptional.
+		BundleAddonsOptional: envBool("KAAS_BUNDLE_ADDONS_OPTIONAL", false),
+		Rec:                  rec,
+		kvm:                  kvm,
+		Shell:                shellBackend,
+		NodeSSH:              nodeSSHBackend,
+		Kube:                 kubeClient,
+		Monitor:              monitorQuerier,
+		Security:             securityQuerier,
+		Audit:                auditQuerier,
+		Tunnel:               tunnelProxier,
+		Values:               valuesProvider,
+		Vault:                vaultMgr,
+		vaultSettings:        vaultSettings,
+		InfraProviders:       infraProviders,
+		sharedNet:            sharedNet,
+		dns:                  dnsSettings,
 		// ~1 month by default: long enough that a downloaded kubeconfig keeps working for a while,
 		// short enough to bound an un-revokable credential (see App.userKubeconfigTTL).
 		userKubeconfigTTL: envDuration("KAAS_USER_KUBECONFIG_TTL", 30*24*time.Hour),
@@ -451,7 +469,11 @@ type CreateRequest struct {
 	NodePools []domain.NodePool `json:"node_pools,omitempty"`
 	HA        bool              `json:"ha"`     // highly-available control plane (3 nodes) vs single node
 	Bundle    string            `json:"bundle"` // release bundle; default = latest supported
-	Addons    []string          `json:"addons"` // subset of catalog add-ons; default = the bundle's add-ons
+	// Addons is the catalog add-ons to install. OMITTED (null) means "the bundle's own add-ons" -
+	// the batteries-included default. A PRESENT list is the exact selection, so an empty one means
+	// no add-ons at all; whether it may drop any of the bundle's own is decided by
+	// App.BundleAddonsOptional (see resolveAddons).
+	Addons []string `json:"addons"`
 	// AddonValues carries per-add-on full Helm values overrides (add-on name -> edited YAML) from the
 	// wizard's editor. An add-on absent here installs with the curated catalog defaults; present here,
 	// its ValuesOverride is set so the reconciler installs it with `helm -f`. See internal/addons/values.
@@ -814,12 +836,36 @@ func (a *App) upgradeDetail(fromBundle, toBundle string) string {
 	return strings.Join(parts, "; ")
 }
 
-// resolveAddons picks the add-ons to install with versions pinned by the bundle. With no
-// explicit selection, it uses the bundle's add-ons; otherwise it validates each requested
-// add-on and pins its version from the bundle (falling back to the catalog's current one).
+// resolveAddons picks the add-ons to install with versions pinned by the bundle. With NO selection
+// at all (a nil list - the field omitted), it uses the bundle's add-ons; otherwise it validates each
+// requested add-on and pins its version from the bundle (falling back to the catalog's current one).
+// nil and empty are deliberately different: with the lock lifted, "I want none of them" is a real
+// answer and an empty list is how it is spelled.
+//
+// Unless the deployment sets KAAS_BUNDLE_ADDONS_OPTIONAL, an explicit selection may only ADD to the
+// bundle's own add-ons, never drop one: the batteries-included set is what a cluster is born with,
+// and dropping one is an edit made on a Ready cluster. This is the API-side half of the wizard's
+// locked add-on cards - the portal renders the lock, but here is where it is enforced.
 func (a *App) resolveAddons(rb catalog.ResolvedBundle, requested []string, overrides map[string]string) ([]domain.Addon, error) {
+	if requested != nil && !a.BundleAddonsOptional {
+		sel := make(map[string]bool, len(requested))
+		for _, n := range requested {
+			sel[n] = true
+		}
+		// rb.Addons is the bundle minus the CNI, which is never selectable - it is installed at
+		// bootstrap, not as an add-on.
+		var missing []string
+		for _, ad := range rb.Addons {
+			if !sel[ad.Name] {
+				missing = append(missing, ad.Name)
+			}
+		}
+		if len(missing) > 0 {
+			return nil, fmt.Errorf("add-ons %s ship with bundle %s and cannot be deselected at create time (they can be removed once the cluster is Ready; a deployment may set KAAS_BUNDLE_ADDONS_OPTIONAL=true to allow it here)", strings.Join(missing, ", "), rb.Name)
+		}
+	}
 	var out []domain.Addon
-	if len(requested) == 0 {
+	if requested == nil {
 		out = make([]domain.Addon, 0, len(rb.Addons))
 		for _, ad := range rb.Addons {
 			out = append(out, domain.Addon{Name: ad.Name, Version: ad.Version, Phase: "pending"})

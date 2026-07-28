@@ -572,6 +572,11 @@ export interface Catalog {
   // first is the default). The wizard shows an Infrastructure step only when there's more than
   // one; with a single provider the choice is implicit.
   providers?: ProviderInfo[];
+  // Whether the bundle's own add-ons may be DESELECTED in the create wizard
+  // (KAAS_BUNDLE_ADDONS_OPTIONAL). False (the default) renders them as locked-on cards - a cluster is
+  // born with the whole batteries-included set and an add-on is removed later, from the Add-ons tab.
+  // True unlocks them, for a host that can't carry the whole set. The API enforces this either way.
+  bundle_addons_optional?: boolean;
 }
 
 // ProviderInfo mirrors app.ProviderInfo: an enabled infrastructure provider, plus (for a shared-

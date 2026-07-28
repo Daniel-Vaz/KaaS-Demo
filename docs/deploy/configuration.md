@@ -38,6 +38,7 @@ backends. See [account & quota](../portal/account-and-admin.md).
 | `KAAS_BUDGET_MEM_MB` | `24576` | The KVM host's memory ceiling (MB) |
 | `KAAS_BUDGET_DISK_GB` | `500` | The KVM host's storage ceiling (GB) - charged for every root disk, every extra disk, and the per-worker storage disk |
 | `KAAS_SHARED_QUOTA` | `false` | Disable per-user quota: every account draws from each backend's **full ceiling**, first-come-first-served (the aggregate cap still prevents oversubscription). The Admin page shows consumption instead of grants |
+| `KAAS_BUNDLE_ADDONS_OPTIONAL` | `false` | Let the create wizard **deselect the bundle's own add-ons**. Off, a cluster is born with the whole batteries-included set and an add-on is removed later from the Add-ons tab. Turn it on when the host can't carry all of it - on a laptop-scale KVM host the bundle can outweigh a small cluster's own workers. API-only (it is an admission decision) |
 
 ## Authentication
 

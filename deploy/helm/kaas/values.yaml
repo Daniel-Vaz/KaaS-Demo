@@ -192,6 +192,12 @@ config:
   budgetVCPU: 16
   budgetMemMB: 24576
 
+  # Let the create wizard DESELECT the add-ons that ship with the bundle. False (the default) means a
+  # cluster is born with the whole batteries-included set and an add-on is removed later, from the
+  # Add-ons tab. Set true when the host can't carry all of it - on a laptop-scale KVM host the bundle
+  # can outweigh a small cluster's own workers, and installing it is what tips the cluster over.
+  bundleAddonsOptional: false
+
   # How long a single reconcile phase may run before River kills and retries it. Sized for the
   # slowest step: a `helm --wait` add-on install, or uploading a multi-GB golden image to a remote
   # hypervisor over SSH. Raise it if your link to the KVM host is slow.

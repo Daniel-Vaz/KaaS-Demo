@@ -87,6 +87,9 @@ func TestSetClusterAddonValuesRejectsBadYAML(t *testing.T) {
 // the very first platform add-on. Requested here in a deliberately hostile order.
 func TestResolveAddonsBundledFirst(t *testing.T) {
 	a := newAddonValuesApp(t)
+	// A hand-picked selection that drops most of the bundle - only legal with the create-time lock
+	// lifted. Ordering is what this test is about, and it is the same either way.
+	a.BundleAddonsOptional = true
 	rb, err := a.Catalog.Resolve("2026.1")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)

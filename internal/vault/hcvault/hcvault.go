@@ -329,9 +329,19 @@ func (c *Client) ensureAuth(ctx context.Context, path, typ string) error {
 }
 
 // authAccessor returns the mount accessor of the configured auth backend, needed to alias entities.
+//
+// Decode the "data" sub-object, NOT the top level. GET /v1/sys/auth repeats the mount map at the top
+// level for backwards compatibility, but merged in with the standard response envelope - request_id,
+// lease_id and mount_type are strings, renewable a bool, lease_duration a number. Unmarshalling that
+// into map[string]struct{Accessor string} fails on the first scalar ("json: cannot unmarshal string
+// into Go value of type struct { Accessor string }"), so authAccessor returned an error for every
+// call and SyncAccess converged NOTHING - no entity, no policy, no group - on every sweep. The bug
+// was invisible in fake mode, which never exercises this path.
 func (c *Client) authAccessor(ctx context.Context) (string, error) {
-	var out map[string]struct {
-		Accessor string `json:"accessor"`
+	var out struct {
+		Data map[string]struct {
+			Accessor string `json:"accessor"`
+		} `json:"data"`
 	}
 	if err := c.do(ctx, http.MethodGet, "/v1/sys/auth", nil, &out); err != nil {
 		return "", err
@@ -340,7 +350,15 @@ func (c *Client) authAccessor(ctx context.Context) (string, error) {
 	if c.set.AuthMode == vault.AuthLDAP {
 		path = "ldap/"
 	}
-	return out[path].Accessor, nil
+	m, ok := out.Data[path]
+	if !ok || m.Accessor == "" {
+		// Not fatal: SyncAccess still writes entities, policies and groups, and only skips the
+		// login-time alias. But without the alias a user's login maps to no entity, so their
+		// policies never apply - warn rather than fail silently, which is how this stayed hidden.
+		c.emit("warn", fmt.Sprintf("vault: auth mount %q has no accessor - entity aliases skipped, logins will carry no cluster policies", strings.TrimSuffix(path, "/")))
+		return "", nil
+	}
+	return m.Accessor, nil
 }
 
 // upsertEntity creates or updates an identity entity by name and returns its id.

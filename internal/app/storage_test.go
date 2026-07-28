@@ -63,6 +63,8 @@ func TestCreateProvisionsAStorageDiskPerWorker(t *testing.T) {
 // would never use.
 func TestNoLonghornMeansNoStorageDisks(t *testing.T) {
 	a, owner := newPoolApp(t)
+	// longhorn is a bundle add-on, so dropping it at create time needs the lock lifted.
+	a.BundleAddonsOptional = true
 	c, err := a.CreateCluster(owner, CreateRequest{
 		Name: "dev", Size: "small", Addons: []string{"metrics-server"},
 		NodePools: []domain.NodePool{{Name: domain.DefaultPoolName, Size: "small", DesiredWorkers: 2}},

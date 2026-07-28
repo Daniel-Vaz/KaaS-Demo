@@ -60,6 +60,10 @@ spec:
             {{- include "kaas.commonEnv" . | nindent 12 }}
             - name: KAAS_ADDR
               value: ":8080"
+            # Whether the create wizard may deselect the bundle's own add-ons. API-only: it is an
+            # admission decision, and the worker installs whatever the cluster row asks for.
+            - name: KAAS_BUNDLE_ADDONS_OPTIONAL
+              value: {{ .Values.config.bundleAddonsOptional | quote }}
             # The API is the one process that must NOT reconcile: the worker owns the loop (it is
             # the only one that can reach libvirt and the cluster VMs). This also keeps every API
             # replica from starting a River client - and its schema migrator - at boot.

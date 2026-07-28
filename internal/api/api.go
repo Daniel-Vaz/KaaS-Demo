@@ -354,11 +354,14 @@ func (s *Server) getOperations(w http.ResponseWriter, r *http.Request) {
 // wizard needs for the same reason (they are the choices available at create time). The provider
 // list rides on this payload rather than a separate endpoint because the wizard already fetches
 // and caches it, and a provider's network shape is as much "what can I ask for" as a bundle is.
+// bundle_addons_optional rides along for the same reason: it decides whether the wizard's bundled
+// add-on cards are locked on. It is advisory to the portal only - CreateCluster enforces it.
 func (s *Server) getCatalog(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, struct {
 		*catalog.Catalog
-		Providers []app.ProviderInfo `json:"providers"`
-	}{s.app.Catalog, s.app.Providers()})
+		Providers            []app.ProviderInfo `json:"providers"`
+		BundleAddonsOptional bool               `json:"bundle_addons_optional"`
+	}{s.app.Catalog, s.app.Providers(), s.app.BundleAddonsOptional})
 }
 
 // getUpgrades lists the release bundles a cluster can be promoted to.

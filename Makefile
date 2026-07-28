@@ -275,7 +275,13 @@ golden-image:
 	 dest="$(GOLDEN_DEST)/$(IMAGE_NAME)"; \
 	 if mkdir -p "$(GOLDEN_DEST)" 2>/dev/null && mv "$$built" "$$dest" 2>/dev/null; then :; \
 	 else echo "golden-image: $(GOLDEN_DEST) needs elevated write - using sudo"; \
-	      sudo mkdir -p "$(GOLDEN_DEST)" && sudo mv "$$built" "$$dest"; fi; \
+	      sudo mkdir -p "$(GOLDEN_DEST)" && sudo mv "$$built" "$$dest" || true; fi; \
+	 if [ ! -f "$$dest" ]; then \
+	   echo "golden-image: FAILED to install the image - $$dest does not exist" >&2; \
+	   echo "golden-image: the built image is still at $$built - move it there yourself, e.g." >&2; \
+	   echo "    sudo mv $$built $$dest" >&2; \
+	   exit 1; \
+	 fi; \
 	 echo "golden-image: moved -> $$dest"
 
 # Build the full set of golden images the shipped catalog references (skips any that already

@@ -59,6 +59,11 @@ services:
       # Turn per-user quota off: every account draws from each backend's full ceiling (the aggregate
       # cap still prevents oversubscription). Admin page shows consumption instead of grant editors.
       - KAAS_SHARED_QUOTA=${KAAS_SHARED_QUOTA:-false}
+      # Let the create wizard deselect the bundle's own add-ons. Default false: a cluster is born
+      # with the whole batteries-included set and add-ons are removed later, from the Add-ons tab.
+      # True is for a host that can't carry all of them (a laptop-scale KVM host). API-only: this
+      # is an admission decision, and the worker installs whatever the cluster row asks for.
+      - KAAS_BUNDLE_ADDONS_OPTIONAL=${KAAS_BUNDLE_ADDONS_OPTIONAL:-false}
       # Which infrastructures users may pick from, and - for the shared-network providers
       # (vSphere, Proxmox) - the network shape and capacity cap ADMISSION needs (the API decides
       # addresses and quota; it does not provision). vCenter/Proxmox/NetBox CREDENTIALS are

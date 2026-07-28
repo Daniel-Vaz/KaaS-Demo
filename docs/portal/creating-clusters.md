@@ -53,6 +53,11 @@ the CNI is always installed); the optional ones - grouped by category - are your
 add your own [custom-catalog](catalog.md) charts too. Anything here can also be changed later from the
 cluster's Add-ons tab.
 
+Where the deployment sets [`KAAS_BUNDLE_ADDONS_OPTIONAL`](../deploy/configuration.md#capacity-budget--quota)
+the bundle's add-ons are **not** locked: they stay preselected, but you can turn any of them off - which
+is what a host too small to carry the whole batteries-included set needs. The banner above the picker
+tells you which of the two you are looking at.
+
 ![Step 5 - the add-on picker, bundle add-ons locked and optional ones selectable](../assets/cluster-creation-5.png)
 
 ### 6. Review

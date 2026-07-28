@@ -101,6 +101,10 @@ export function CreateCluster() {
 
   const providers = useMemo(() => catalog?.providers ?? [], [catalog]);
   const multiProvider = providers.length > 1;
+  // KAAS_BUNDLE_ADDONS_OPTIONAL: whether the bundle's own add-ons may be turned OFF here. Off (the
+  // default) they render as locked-on cards and are removed later from the cluster's Add-ons tab;
+  // on, they are ordinary toggles - for a host that can't carry the whole batteries-included set.
+  const bundleAddonsOptional = !!catalog?.bundle_addons_optional;
 
   const form = useForm<FormValues>({
     initialValues: {
@@ -647,9 +651,21 @@ export function CreateCluster() {
               <Stepper.Step label="Add-ons" description="Optional software">
                 <Stack mt="xl" gap="lg">
                   <Alert variant="light" color="blue" icon={<IconInfoCircle size={16} />} radius="md">
-                    The bundle's add-ons are preselected and locked - they ship with the bundle, so
-                    they can't be disabled here. The CNI ({selectedBundle?.cni}) is always installed
-                    too. You can change non-bundle add-ons anytime from the cluster's Add-ons tab.
+                    {bundleAddonsOptional ? (
+                      <>
+                        The bundle's add-ons are preselected but can be turned off - useful when the
+                        host can't carry the whole set. The CNI ({selectedBundle?.cni}) is always
+                        installed. You can add or remove add-ons anytime from the cluster's Add-ons
+                        tab.
+                      </>
+                    ) : (
+                      <>
+                        The bundle's add-ons are preselected and locked - they ship with the bundle,
+                        so they can't be disabled here. The CNI ({selectedBundle?.cni}) is always
+                        installed too. You can change non-bundle add-ons anytime from the cluster's
+                        Add-ons tab.
+                      </>
+                    )}
                   </Alert>
 
                   {optionalAddons.length === 0 && (
@@ -682,7 +698,7 @@ export function CreateCluster() {
                               description={a.description}
                               icon={meta.icon}
                               color={meta.color}
-                              locked={!!pinned}
+                              locked={!!pinned && !bundleAddonsOptional}
                               selected={form.values.addons.includes(a.name)}
                               edited={!!form.values.addonValues[a.name]}
                               onToggle={() => toggleAddon(a.name)}
@@ -747,7 +763,13 @@ export function CreateCluster() {
                   )}
                   <ReviewRow
                     label="Add-ons"
-                    value={form.values.addons.length ? form.values.addons.join(', ') : 'bundle defaults'}
+                    // The wizard always sends an explicit selection, so an empty one means exactly
+                    // that: no add-ons at all (the CNI still ships with the bundle).
+                    value={
+                      form.values.addons.length
+                        ? form.values.addons.join(', ')
+                        : `none (${selectedBundle?.cni ?? 'CNI'} only)`
+                    }
                   />
                   {form.values.customAddons.length > 0 && (
                     <ReviewRow

@@ -10,7 +10,9 @@ output "network" {
 }
 
 # Per-node observed state, read back by the Go wrapper via `tofu output -json` and mapped
-# to provision.ProvisionedNode. IP comes from the DHCP lease on the libvirt network.
+# to provision.ProvisionedNode. IP comes from the DHCP lease on the libvirt network - which is a
+# single lease per node only because the cloud-init network_config pins dhcp-identifier: mac (see
+# the note there); otherwise the guest holds two leases and this output reports the wrong one.
 output "nodes" {
   value = {
     # key by the short node name (matches provision.NodeSpec.VMName), not the composed

@@ -79,7 +79,17 @@ act** - a repairer without those is a cluster shredder.
   release *bundles* with `supersedes` upgrade chains. Editing versions is a data change. The default
   bundle ships a batteries-included set: Cilium (CNI), Longhorn (storage), MetalLB + Envoy Gateway
   (ingress), cert-manager (TLS), external-dns, external-secrets, kube-prometheus-stack, metrics-server,
-  and trivy-operator.
+  and trivy-operator. That set is **locked on at create time** and removable only from a Ready cluster;
+  `KAAS_BUNDLE_ADDONS_OPTIONAL` lifts the lock, because on a laptop-scale KVM host the bundle can
+  outweigh a small cluster's own workers and installing all of it is what tips the cluster over. Two
+  things are load-bearing: the lock lives in **`app.resolveAddons`, not the portal** (the wizard renders
+  the padlocks, the API is the gate - same split as every other tenancy decision), and a create
+  request's `addons` distinguishes **nil from empty** - omitted means "the bundle's set", present-but-
+  empty means "none at all", which is the only way "I want no add-ons" is expressible. Nothing else
+  changes: every wiring step already gates on its own add-on being installed
+  (`reconcileGatewayWiring`, `reconcileMonitoringWiring`, `reconcileVaultWiring`, `reconcileDNSWiring`,
+  and the per-worker Longhorn disk), so this lifts an admission-time restriction and adds no new
+  tolerance.
 - **Custom catalogs:** per-user, self-defined Helm-chart add-ons (`internal/domain.CustomCatalog`,
   `internal/app/customcatalog.go`) - the tenant-facing counterpart to the built-in catalog, owned and
   group-shared like clusters. Selecting one onto a cluster copies its chart definition into the
