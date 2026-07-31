@@ -18,7 +18,7 @@
     "@codemirror/view": "^6.43.6",
     "@mantine/charts": "^9.4.2",
     "@mantine/core": "^9.4.2",
-    "@mantine/form": "^9.4.2",
+    "@mantine/form": "^9.5.0",
     "@mantine/hooks": "^9.4.2",
     "@mantine/modals": "^9.4.2",
     "@mantine/notifications": "^9.4.2",
