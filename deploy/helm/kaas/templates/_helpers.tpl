@@ -194,6 +194,10 @@ production would mount a scoped token via secretKeyRef.
   value: {{ .Values.vault.seam | quote }}
 - name: KAAS_VAULT_ADDR
   value: {{ tpl .Values.vault.addr . | quote }}
+{{- if .Values.vault.clusterAddr }}
+- name: KAAS_VAULT_CLUSTER_ADDR
+  value: {{ tpl .Values.vault.clusterAddr . | quote }}
+{{- end }}
 - name: KAAS_VAULT_MOUNT
   value: {{ .Values.vault.mount | quote }}
 - name: KAAS_VAULT_TOKEN

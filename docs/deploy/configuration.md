@@ -221,7 +221,8 @@ Full guide: [Vault](integrations/vault.md).
 | Var | Default | Meaning |
 |---|---|---|
 | `KAAS_VAULT` | `fake` | `fake` \| `real` |
-| `KAAS_VAULT_ADDR` | `http://vault:8200` | Vault API address (also written into each cluster's ClusterSecretStore, so ESO must reach it) |
+| `KAAS_VAULT_ADDR` | `http://vault:8200` | Vault API address - the platform's own route (API + worker) |
+| `KAAS_VAULT_CLUSTER_ADDR` | = `KAAS_VAULT_ADDR` | Address written into each cluster's ClusterSecretStore; ESO must reach it from inside the cluster |
 | `KAAS_VAULT_TOKEN` | - | The worker's management token, or the API's narrow minter token |
 | `KAAS_VAULT_MOUNT` | `kaas` | The KV v2 mount the platform owns |
 | `KAAS_VAULT_UI_URL` | = `KAAS_VAULT_ADDR` | Browser-facing base for the "View in Vault" deep-link |

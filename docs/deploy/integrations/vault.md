@@ -27,7 +27,8 @@ storage) so the whole flow works out of the box - a deliberate lab shortcut. The
 
 ```bash
 KAAS_VAULT=real                              # fake = in-memory (default in fake mode)
-KAAS_VAULT_ADDR=http://vault:8200            # the Vault API address
+KAAS_VAULT_ADDR=http://vault:8200            # the platform's own route to Vault (API + worker)
+KAAS_VAULT_CLUSTER_ADDR=                     # the route from inside a cluster (default: = _ADDR)
 KAAS_VAULT_TOKEN=kaas-root-dev               # the management/minter token
 KAAS_VAULT_MOUNT=kaas                        # the KV v2 mount the platform owns
 KAAS_VAULT_UI_URL=http://localhost:8200      # browser-facing base for "View in Vault"
@@ -40,9 +41,12 @@ The token is split by role, the same way the reconcile loop splits per-cluster f
 - The **API** holds a narrow **minter token** used only to mint the short-lived token behind the "View
   in Vault" handoff.
 
-> **For a real cluster**, `KAAS_VAULT_ADDR` is also written into each cluster's `ClusterSecretStore`, so
-> the in-cluster External Secrets Operator must be able to reach it - set it to a host-reachable address
-> (e.g. `http://<host-ip>:8200`), not `host.containers.internal`.
+> **For a real cluster**, set `KAAS_VAULT_CLUSTER_ADDR`: it is the address written into each cluster's
+> `ClusterSecretStore`, so the in-cluster External Secrets Operator must be able to reach it from inside
+> the cluster - a node-network address (e.g. `http://<host-ip>:8200`), not `host.containers.internal`.
+> Leave `KAAS_VAULT_ADDR` on the platform's own local route. Pointing *it* at the tenant-facing address
+> instead puts the reconcile loop on that route, and when the route breaks every cluster loops in
+> `InstallingAddons` re-running its add-on installs, rather than just ESO failing to sync.
 
 ## Auth mode follows the portal
 

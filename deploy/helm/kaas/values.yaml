@@ -144,6 +144,13 @@ vault:
   # Address the platform reaches Vault at. Default targets the bundled dependency's service. For an
   # external Vault set this and vault.enabled=false.
   addr: "http://{{ .Release.Name }}-vault:8200"
+  # Address a TENANT CLUSTER reaches Vault at - written into each cluster's ClusterSecretStore for the
+  # in-cluster External Secrets Operator. The default `addr` above is a Service in the MANAGEMENT
+  # cluster, which a tenant cluster cannot resolve, so set this to a routable address (an Ingress or a
+  # LoadBalancer for Vault) whenever external-secrets is expected to work. Empty = same as `addr`.
+  # Keep it separate rather than pointing `addr` here: `addr` is the reconcile loop's own route, and a
+  # broken one loops every cluster in InstallingAddons instead of only degrading ESO.
+  clusterAddr: ""
   mount: kaas
   # The management/root token. Dev mode uses a fixed root token; production would use a scoped token
   # from a KMS/External Secrets, not a chart value (the same shortcut as config.secretKey).

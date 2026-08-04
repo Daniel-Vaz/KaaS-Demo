@@ -177,11 +177,17 @@ services:
       # the same `vault` service the API mints handoff tokens against - reached over the host (the
       # worker is --network host), unlike the API's compose-network `vault:8200`.
       #
-      # NOTE for real ESO: KAAS_VAULT_ADDR is ALSO the address written into each cluster's
-      # ClusterSecretStore, so the in-cluster External Secrets Operator must be able to reach it. For a
-      # real cluster set this to the host's LAN IP (http://<host-ip>:8200), not host.containers.internal.
+      # KAAS_VAULT_ADDR is the WORKER's own route to Vault, and it should stay local: pointing it at a
+      # tenant-facing address makes the reconcile loop depend on that route, and a broken one then
+      # fails reconcileVaultWiring and loops every cluster in InstallingAddons.
+      #
+      # NOTE for real ESO: KAAS_VAULT_CLUSTER_ADDR is the address written into each cluster's
+      # ClusterSecretStore, so the in-cluster External Secrets Operator must be able to reach it - a
+      # LAN IP the cluster VMs can route to (http://<host-ip>:8200), never host.containers.internal.
+      # Unset, it falls back to KAAS_VAULT_ADDR, which is right when both share one route.
       - KAAS_VAULT=${KAAS_VAULT:-real}
       - KAAS_VAULT_ADDR=${KAAS_VAULT_ADDR:-http://host.containers.internal:8200}
+      - KAAS_VAULT_CLUSTER_ADDR=${KAAS_VAULT_CLUSTER_ADDR:-}
       - KAAS_VAULT_TOKEN=${KAAS_VAULT_TOKEN:-kaas-root-dev}
       - KAAS_VAULT_MOUNT=${KAAS_VAULT_MOUNT:-kaas}
       - KAAS_VAULT_INSECURE=${KAAS_VAULT_INSECURE:-0}

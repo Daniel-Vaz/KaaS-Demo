@@ -532,8 +532,15 @@ Load-bearing:
 - **The in-cluster copy is never a static Vault token in a Helm value.** ESO authenticates with the
   per-cluster JWT auth role, so no long-lived credential lands in a pod spec - the same discipline as
   the DNS Secret vs. a Helm value.
-- **`KAAS_VAULT_ADDR` is also written into each cluster's `ClusterSecretStore`**, so on a real cluster
-  it must be an address ESO can reach (a host LAN IP, not `host.containers.internal`).
+- **The address has two consumers, and they are split.** `KAAS_VAULT_ADDR` is the platform's own route
+  (API and worker); `KAAS_VAULT_CLUSTER_ADDR` is what goes into each cluster's `ClusterSecretStore`,
+  so on a real cluster it must be an address ESO can reach from *inside* the cluster - a node-network
+  address, not `host.containers.internal`. Unset, it falls back to `KAAS_VAULT_ADDR`, which is right
+  whenever both share one route. Keeping them separate matters because collapsing them puts the
+  reconcile loop on the tenant-facing route: a tunnelled or otherwise fragile address then fails
+  `reconcileVaultWiring` and loops **every** cluster in `InstallingAddons`, re-running all of its
+  add-on installs, where the split degrades only ESO's secret syncing - the one thing that route is
+  actually for.
 - **The platform only ever writes under its own `kaas` mount** and manages its own policies/identity,
   so it coexists with a Vault already used for other things.
 

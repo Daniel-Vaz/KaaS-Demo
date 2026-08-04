@@ -29,8 +29,17 @@ import (
 
 // EnsureExternalSecrets applies the cluster's ClusterSecretStore (Vault provider, jwt auth over the
 // per-cluster auth mount/role, confined to the cluster's own KV subtree). Idempotent (`kubectl apply`
-// on the first control plane). The Vault address + mount come from the worker's env - the same place
-// the worker's management token lives.
+// on the first control plane). The Vault mount comes from the worker's env - the same place the
+// worker's management token lives.
+//
+// The ADDRESS is the one thing that does not: this is the address ESO dials from INSIDE the cluster,
+// which is not necessarily the one the worker uses. On a tunnelled deployment the worker reaches
+// Vault locally (the compose network, or a published port on the container host) while the cluster
+// can only reach it wherever it is exposed on the node network. Collapsing the two makes the
+// reconcile loop depend on the tenant-facing route: a broken tunnel then fails reconcileVaultWiring
+// and loops every cluster in InstallingAddons, rather than degrading only ESO's secret syncing.
+// KAAS_VAULT_CLUSTER_ADDR splits them; unset, it falls back to the worker's own address, which is
+// correct whenever both sides share one route (up-fake, an in-cluster Vault, a routable host).
 func (m *Manager) EnsureExternalSecrets(ctx context.Context, c *domain.Cluster) error {
 	if _, err := m.prep(c); err != nil {
 		return err
@@ -39,8 +48,12 @@ func (m *Manager) EnsureExternalSecrets(ctx context.Context, c *domain.Cluster) 
 	if mount == "" {
 		mount = vault.DefaultMount
 	}
+	addr := os.Getenv("KAAS_VAULT_CLUSTER_ADDR")
+	if addr == "" {
+		addr = os.Getenv("KAAS_VAULT_ADDR")
+	}
 	return m.playbook(ctx, c, "external-secrets.yml", map[string]any{
-		"vault_addr":           os.Getenv("KAAS_VAULT_ADDR"),
+		"vault_addr":           addr,
 		"vault_mount":          mount,
 		"vault_cluster_prefix": vault.ClusterPrefix(c.ID),
 		"vault_auth_mount":     "jwt-" + c.ID,
