@@ -15,10 +15,14 @@ import (
 
 	"github.com/Daniel-Vaz/KaaS-demo/internal/api"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/app"
+	"github.com/Daniel-Vaz/KaaS-demo/internal/version"
 )
 
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	// First line in the log names the build, so a container's logs alone answer "which version is
+	// this?" without hitting GET /version. Reports "dev" when the binary was not stamped.
+	log.Info("kaas api", "version", version.String())
 
 	a, err := app.New(log)
 	if err != nil {

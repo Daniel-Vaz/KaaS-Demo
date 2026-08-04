@@ -1,0 +1,40 @@
+# Shapes the notes GitHub generates for a release (`gh release create --generate-notes`), by
+# grouping merged pull requests into sections by label. Release notes are generated rather than
+# hand-maintained on purpose: a CHANGELOG.md is one more file to remember before every tag, and the
+# thing it would say is already recorded on the PRs.
+#
+# Labelling a PR is therefore the only per-change work a release needs. An unlabelled PR still
+# appears - under "Other changes" - so forgetting one costs tidiness, never coverage.
+changelog:
+  exclude:
+    labels:
+      - ci
+      - chore
+      - skip-changelog
+    authors:
+      - github-actions
+
+  categories:
+    - title: ✨ Features
+      labels: [feature, enhancement]
+
+    - title: 🐛 Fixes
+      labels: [bug, fix]
+
+    - title: 🔒 Security
+      labels: [security]
+
+    # Provisioning, config management and add-on changes are what actually touch a running cluster,
+    # so they are worth reading separately from portal or API work.
+    - title: 🛠️ Infrastructure & providers
+      labels: [provider, infra, ansible, catalog]
+
+    - title: 📖 Documentation
+      labels: [documentation, docs]
+
+    # Dependabot already applies this one, so its batches file themselves.
+    - title: ⬆️ Dependencies
+      labels: [dependencies]
+
+    - title: Other changes
+      labels: ['*']

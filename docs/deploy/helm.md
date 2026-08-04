@@ -24,13 +24,34 @@ horizontal scalability.
                                                   KVM host (VMs)
 ```
 
+## Released chart, or the tree
+
+Two ways to get the chart, and they behave identically:
+
+```bash
+# Released - resolves its images from its own appVersion, so a version is all you give it
+helm install kaas oci://ghcr.io/daniel-vaz/kaas-demo/charts/kaas --version 0.3.0
+
+# From the tree - deploys whatever the checked-out Chart.yaml's appVersion names
+helm install kaas deploy/helm/kaas
+```
+
+Every example below uses the tree path for brevity; swap in `oci://…/charts/kaas --version X` and the
+flags are the same. Pinning, per-component overrides and rollback are covered in
+[Releasing](releasing.md); the short version is that you normally set **no** `image.*` value at all.
+
+> [!NOTE]
+> Installing from the tree needs the Vault subchart vendored first: `helm dependency update
+> deploy/helm/kaas`. The released chart already carries it.
+
 ## Try it with no hypervisor
 
 `providers=fake` runs the **same** control plane against simulated backends - the Kubernetes
 counterpart of `make up-fake`, and the way to see the chart work on any cluster:
 
 ```bash
-helm install kaas deploy/helm/kaas --set providers=fake
+helm install kaas oci://ghcr.io/daniel-vaz/kaas-demo/charts/kaas --version 0.3.0 \
+  --set providers=fake
 kubectl port-forward svc/kaas-web 8080:80    # → http://localhost:8080  (admin / admin)
 ```
 
@@ -101,6 +122,10 @@ addresses in NetBox.
   frozen and the Terminal won't work.
 - **Postgres is not replicated** by the chart. Point `postgres.external.dsn` at a managed instance for
   anything real.
+- **Setting `image.tag` overrides `appVersion` for all five images.** That is the rollback / local-build
+  path, not the everyday one - a released chart already names the platform it was tested against. To
+  move a single component (a hotfix), use `image.tags.<component>` instead. See
+  [Releasing](releasing.md).
 
 The full, commented surface is in [`values.yaml`](../../deploy/helm/kaas/values.yaml). Lint and render
 it in every mode with `make helm-lint`.

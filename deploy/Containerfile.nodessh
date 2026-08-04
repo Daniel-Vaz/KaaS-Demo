@@ -6,14 +6,39 @@
 # (internal/nodessh/sshpty). No bash, no kubectl, no infra tooling: there is no session from which to
 # read the key it carries. That is why it is a separate binary and image from the shell agent rather
 # than a flag on it. See internal/nodessh and cmd/node-ssh-agent.
+# Build identity, passed in by `make images` and by .github/workflows/release.yml. See
+# internal/version and docs/deploy/releasing.md.
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG DATE=unknown
+
 FROM docker.io/library/golang:1.26 AS build
+ARG VERSION
+ARG COMMIT
+ARG DATE
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /out/node-ssh-agent ./cmd/node-ssh-agent
+RUN CGO_ENABLED=0 go build \
+      -ldflags "-X github.com/Daniel-Vaz/KaaS-demo/internal/version.Version=${VERSION} \
+                -X github.com/Daniel-Vaz/KaaS-demo/internal/version.Commit=${COMMIT} \
+                -X github.com/Daniel-Vaz/KaaS-demo/internal/version.Date=${DATE}" \
+      -o /out/node-ssh-agent ./cmd/node-ssh-agent
 
 FROM docker.io/library/ubuntu:26.04
+
+ARG VERSION
+ARG COMMIT
+ARG DATE
+LABEL org.opencontainers.image.title="kaas-nodessh" \
+      org.opencontainers.image.description="KubeHarbor node-SSH sandbox (holds the VM key, ships no shell)" \
+      org.opencontainers.image.source="https://github.com/Daniel-Vaz/KaaS-Demo" \
+      org.opencontainers.image.documentation="https://github.com/Daniel-Vaz/KaaS-Demo/blob/main/docs/README.md" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${COMMIT}" \
+      org.opencontainers.image.created="${DATE}" \
+      org.opencontainers.image.vendor="KubeHarbor"
 
 ENV DEBIAN_FRONTEND=noninteractive
 

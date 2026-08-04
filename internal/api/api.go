@@ -29,6 +29,7 @@ import (
 	"github.com/Daniel-Vaz/KaaS-demo/internal/shell"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/store"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/tunnel"
+	"github.com/Daniel-Vaz/KaaS-demo/internal/version"
 	"github.com/coder/websocket"
 )
 
@@ -43,11 +44,18 @@ func NewServer(a *app.App, log *slog.Logger) *Server { return &Server{app: a, lo
 const sessionCookie = "kaas_session"
 
 // Routes returns the HTTP handler (Go 1.22+ method+pattern routing), wrapped in the auth
-// middleware. All routes except the public allowlist (healthz, register, login, logout) require a
-// valid session; the resolved actor is threaded through the request context (see actorFrom).
+// middleware. All routes except the public allowlist (healthz, version, register, login, logout)
+// require a valid session; the resolved actor is threaded through the request context (see
+// actorFrom).
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+	// Which release this deployment is running (internal/version, stamped at build time). Public
+	// for the same reason /healthz is - it answers a question about the process, not about any
+	// tenant - and the payload is deliberately just version/commit/date. The portal footer reads it.
+	mux.HandleFunc("GET /version", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, version.Get())
+	})
 
 	// Auth / session.
 	mux.HandleFunc("POST /auth/register", s.register)
@@ -177,7 +185,7 @@ func (s *Server) Routes() http.Handler {
 type actorCtxKey struct{}
 
 // withAuth resolves the session cookie into an actor and puts it on the request context. Public
-// routes (login, register, logout, healthz) pass through; everything else 401s without a valid
+// routes (login, register, logout, healthz, version) pass through; everything else 401s without a valid
 // session. SSE and the shell WebSocket ride the same same-origin cookie, so they authenticate here
 // too - no header plumbing needed.
 func (s *Server) withAuth(next http.Handler) http.Handler {
@@ -198,7 +206,7 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 // isPublic reports whether a route is reachable without a session.
 func isPublic(method, path string) bool {
 	switch path {
-	case "/healthz":
+	case "/healthz", "/version":
 		return method == http.MethodGet
 	// /auth/config is public because it is what the login page reads BEFORE it can authenticate -
 	// to know whether to offer a register form at all. It exposes only which mechanism is

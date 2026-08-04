@@ -25,7 +25,8 @@ repeat the load-bearing rationale this file carries. Start with:
 - [`docs/concepts/keeping-clusters-healthy.md`](docs/concepts/keeping-clusters-healthy.md) - the
   self-healing story: health, repair, backups, cert rotation, etcd maintenance.
 - [`docs/deploy/`](docs/deploy/README.md) - operator guide: Compose/Helm deployment, providers
-  (libvirt/vSphere/Proxmox), integrations (LDAP/DNS/Vault/NetBox), golden images, and the full
+  (libvirt/vSphere/Proxmox), integrations (LDAP/DNS/Vault/NetBox), golden images, the
+  [release workflow](docs/deploy/releasing.md), and the full
   [configuration reference](docs/deploy/configuration.md).
 - [`docs/portal/`](docs/portal/README.md) - the end-user guide to every portal page (image-heavy).
 - [`docs/concepts/why-kubeharbor.md`](docs/concepts/why-kubeharbor.md) - why the project exists.
@@ -1024,7 +1025,60 @@ Four rules keep it correct, and **new code must not break them**:
 - JSON is `snake_case` (domain types carry the tags); the portal (`web/portal/`) consumes it
   under `/api` (nginx in containers, Vite proxy in `make web-dev`). The API serves JSON + SSE
   only - it has no HTML routes.
+- Releases are **tag-driven**: `v1.4.0` (the five images), `chart-v0.3.0` (the Helm chart),
+  `worker-v1.4.1` (one image, the hotfix path). The root `VERSION` file is the platform version's
+  single source of truth; `make release-check` (run by CI on every PR) is the backstop. Never bump a
+  mirror by hand - `make bump VERSION=x.y.z`. See *Releases* below.
 - Commit only when asked; branch off `main` first if you do.
+
+## Releases
+
+Releases happen by **pushing a git tag** and nothing else - no release button, no self-publishing
+branch, no step that runs from a laptop, so the tag is the record of what shipped
+(`.github/workflows/release.yml`, `release-chart.yml`; operator guide in
+[`docs/deploy/releasing.md`](docs/deploy/releasing.md)). Five images and the chart go to GHCR; the
+`lb` image is compose-only and deliberately unpublished. Six things are load-bearing:
+
+- **One platform version across all five images, published as five INDEPENDENT packages.** `api`,
+  `worker`, `shell` and `nodessh` are one Go module sharing `internal/` - the exec-agent wire
+  protocol, the store, the domain types - so a deployment running two of them at different versions
+  is a hazard, not a convenience, and independent semver per image would make that the default state.
+  What "individually" buys is real anyway: each is its own pullable, pinnable package. The one
+  exception is the `<component>-v*` **hotfix tag**, consumed by the chart's `image.tags.<component>`
+  override, and it is documented as temporary - fold it into the next platform release.
+- **The chart floats free** (`chart-v*`), because the deployment surface changes on a different
+  rhythm: a template fix is a chart release with no image rebuilt, and most platform releases need no
+  chart change. What ties them is the chart's **`appVersion`**, which `kaas.image`
+  (`templates/_helpers.tpl`) resolves every image tag from - so `values.yaml`'s `image.tag` must stay
+  **EMPTY**. It used to be `latest`, which shadowed `appVersion` entirely and made the chart both
+  unreleasable and silently pinned to a moving tag.
+- **`VERSION` is a single source with a CI backstop, not a documented checklist.** Three files carried
+  a version with nothing tying them together; the chart's `appVersion` is load-bearing, so drift there
+  publishes a chart pointing at images nobody built. `scripts/version.py` owns the rule and is called
+  from three places - `make release-check`, the CI `version` job, and the release workflow's tag guard
+  (`--check <expected>`) - rather than reimplemented in each. Same discipline as
+  `clusters_network_cidr_live`: a convention gets a mechanism.
+- **The release re-runs CI by CALLING `ci.yml`** (`workflow_call`), never by copying its jobs. A
+  release must not be able to pass a weaker gate than an ordinary PR.
+- **GitHub Deployments are RECORD-ONLY**, and the `release` environment is an approval gate in front
+  of every publish. The platform runs as Podman containers inside WSL2, which a GitHub-hosted runner
+  cannot reach - and a CI credential that *could* reach it would put a GitHub-triggered process next
+  to the libvirt socket, `KAAS_SECRET_KEY` and every tenant's Vault token. The pipeline holds nothing
+  but a repo-scoped `GITHUB_TOKEN`. A real deploy job is a documented seam (a self-hosted runner),
+  not a wired one.
+- **A prerelease publishes only its exact version** - never `latest`, never the `X.Y` alias. Moving
+  either would hand an rc to everything tracking them.
+
+Build identity is stamped, not guessed: `internal/version` is filled by `-ldflags -X` from the
+Makefile and the Containerfile `ARG`s, surfaced on the public `GET /version` (public for the same
+reason `/healthz` is, and carrying version/commit/date only - which release is running is not a
+secret, the machine that built it is), logged at start-up by both binaries, and shown in the portal's
+sidebar footer. The portal READS it from the API rather than baking in its own `package.json`
+version, because web and api are separate images that legitimately differ mid-upgrade. Published
+digests carry a keyless `attest-build-provenance` attestation. Images are `linux/amd64` only - the
+worker bakes OpenTofu with three provider plugins plus Ansible/Helm/kubectl, and cross-building that
+under QEMU would dominate the pipeline for a platform nobody runs; adding arm64 is one line in
+`platforms`. *Production would* also sign with cosign and publish an SBOM per image.
 
 ## Hard environment constraints
 

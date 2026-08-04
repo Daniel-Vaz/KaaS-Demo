@@ -186,6 +186,15 @@ export interface AuthConfig {
   registration_enabled: boolean;
 }
 
+// VersionInfo is GET /version: the build identity of the API this portal is talking to (Go's
+// internal/version, stamped at release time). Public, like /healthz. "dev" means an unstamped
+// build - see docs/deploy/releasing.md.
+export interface VersionInfo {
+  version: string;
+  commit: string;
+  date: string;
+}
+
 // GroupView is a group plus its members' usernames (GET /groups).
 export interface GroupView extends Group {
   members: string[] | null;

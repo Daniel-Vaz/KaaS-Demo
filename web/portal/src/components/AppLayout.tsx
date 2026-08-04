@@ -38,6 +38,7 @@ import {
 import kaasLogo from '../assets/kaas-logo.png';
 import { useAuth } from '../lib/auth';
 import { api } from '../lib/api';
+import { useVersion } from '../lib/queries';
 import type { GroupMembership } from '../lib/types';
 
 // memberSubtitle summarizes a non-admin user's group standing for the account menu. Roles are now
@@ -46,6 +47,26 @@ function memberSubtitle(memberships: GroupMembership[] | null | undefined): stri
   const n = memberships?.length ?? 0;
   if (n === 0) return 'Member';
   return `Member · ${n} group${n === 1 ? '' : 's'}`;
+}
+
+// VersionFooter names the release the API is running, at the foot of the sidebar. It reads GET
+// /version (public, stamped at build time) rather than this bundle's own package.json, so it names
+// the platform rather than the web image - the two are separate images and can legitimately differ
+// during a rolling upgrade. The commit is a title attribute rather than visible text: it's what you
+// need when reporting a bug, not something to read every day. Renders nothing until the fetch
+// lands, and nothing at all if it fails - a missing footer is better than an error in the chrome.
+function VersionFooter() {
+  const { data } = useVersion();
+  if (!data) return null;
+  const commit = data.commit && data.commit !== 'unknown' ? data.commit.slice(0, 7) : null;
+  return (
+    <Box pt="xs" style={{ borderTop: '1px solid var(--mantine-color-default-border)' }}>
+      <Text size="xs" c="dimmed" ta="center" title={`commit ${data.commit} · built ${data.date}`}>
+        KubeHarbor {data.version}
+        {commit ? ` · ${commit}` : ''}
+      </Text>
+    </Box>
+  );
 }
 
 const NAV = [
@@ -192,6 +213,9 @@ export function AppLayout({ children }: { children: ReactNode }) {
               />
             );
           })}
+        </AppShell.Section>
+        <AppShell.Section>
+          <VersionFooter />
         </AppShell.Section>
       </AppShell.Navbar>
 

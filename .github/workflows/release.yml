@@ -1,0 +1,302 @@
+# Publishes the platform's container images and cuts the GitHub Release. Triggered ONLY by a tag
+# push - there is no manual "release" button and no branch that releases itself, so the tag is
+# always the record of what shipped. See docs/deploy/releasing.md for the operator-facing guide.
+#
+# Two tag shapes land here:
+#
+#   v1.4.0        the normal path - all five images, at one version, plus the Release.
+#   worker-v1.4.1 the hotfix path - ONE image, rebuilt and republished on its own.
+#
+# One platform version across all five images is deliberate: api, worker, shell and nodessh are one
+# Go module sharing internal/ (the exec-agent wire protocol, the store, the domain types), so a
+# deployment running two of them at different versions is a real hazard, not a convenience. They are
+# still published as five INDEPENDENT packages - individually pullable, individually pinnable
+# (image.tags.<component> in the chart) - which is what the hotfix path consumes.
+#
+# The Helm chart is NOT released here. It has its own lifecycle and its own tag line; see
+# release-chart.yml.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+      - 'api-v*.*.*'
+      - 'web-v*.*.*'
+      - 'worker-v*.*.*'
+      - 'shell-v*.*.*'
+      - 'nodessh-v*.*.*'
+
+# Never cancel a release in flight: half-published images are worse than a queued run.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Parse the tag and refuse to go further if it disagrees with the tree. Every guard here is
+  # something that is cheap to check now and expensive to discover after publishing.
+  prepare:
+    name: Prepare (parse tag · guard)
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+      components: ${{ steps.parse.outputs.components }}
+      prerelease: ${{ steps.parse.outputs.prerelease }}
+      platform: ${{ steps.parse.outputs.platform }}
+      registry: ${{ steps.parse.outputs.registry }}
+      version_tags: ${{ steps.parse.outputs.version_tags }}
+      date: ${{ steps.parse.outputs.date }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the ancestry guard below needs main's history, not just the tag
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Parse the tag
+        id: parse
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          all="api web worker shell nodessh"
+
+          # `v1.4.0` releases everything; `worker-v1.4.1` releases exactly one image.
+          if [[ "$tag" =~ ^v(.+)$ ]]; then
+            version="${BASH_REMATCH[1]}"; platform=true
+            components=$(printf '%s\n' $all | jq -R . | jq -sc .)
+          elif [[ "$tag" =~ ^([a-z]+)-v(.+)$ ]]; then
+            component="${BASH_REMATCH[1]}"; version="${BASH_REMATCH[2]}"; platform=false
+            if ! printf '%s\n' $all | grep -qx "$component"; then
+              echo "::error::'$component' is not a published component (one of: $all)"; exit 1
+            fi
+            components=$(jq -nc --arg c "$component" '[$c]')
+          else
+            echo "::error::tag '$tag' matches neither vX.Y.Z nor <component>-vX.Y.Z"; exit 1
+          fi
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$version' is not MAJOR.MINOR.PATCH[-prerelease]"; exit 1
+          fi
+
+          # A prerelease publishes ONLY its exact version. Moving `latest` or the X.Y alias to an rc
+          # would hand it to every deployment that tracks them - the opposite of what an rc is for.
+          prerelease=false
+          [[ "$version" == *-* ]] && prerelease=true
+
+          # The image tags every component gets. A component tag publishes its exact version only:
+          # `latest` means "the current platform release", and one hotfixed image is not that.
+          tags="$version"
+          if [[ "$prerelease" == false && "$platform" == true ]]; then
+            tags="$tags"$'\n'"${version%.*}"$'\n'"latest"
+          fi
+
+          # GHCR paths are lowercase; the repo name is not (Daniel-Vaz/KaaS-Demo).
+          registry="ghcr.io/$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+
+          {
+            echo "version=$version"
+            echo "platform=$platform"
+            echo "prerelease=$prerelease"
+            echo "components=$components"
+            echo "registry=$registry"
+            # Stamped once here rather than per matrix job, so all five images of one release
+            # report the same build time.
+            echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "version_tags<<EOF"; echo "$tags"; echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Releasing $version from $tag -> $registry (components: $components)"
+
+      # The tag must name the version the tree actually holds. Without this a forgotten `make bump`
+      # publishes images tagged 1.4.0 that report 1.3.0 on GET /version, and a chart whose appVersion
+      # points at a platform that was never built. Same script `make release-check` runs locally and
+      # CI runs on every PR - one implementation of the rule, checked in three places.
+      - name: Guard - the tag matches VERSION and Chart.yaml appVersion
+        if: steps.parse.outputs.platform == 'true'
+        run: scripts/version.py --check "${{ steps.parse.outputs.version }}"
+
+      # Releasing a commit that never landed on main means shipping code that was never reviewed and
+      # can never be reproduced from the default branch.
+      - name: Guard - the tag is an ancestor of main
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::${GITHUB_REF_NAME} points at a commit that is not on main"; exit 1
+          fi
+
+  # The full PR gate, re-run at the tagged commit. A call rather than a copy, so a release can never
+  # pass a weaker set of checks than an ordinary pull request.
+  verify:
+    name: Verify
+    needs: prepare
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  # The approval gate, and the only reason this job exists. Everything downstream needs it, so
+  # nothing reaches GHCR until a human approves the `release` environment - and it sits AFTER verify,
+  # so nobody is asked to approve a build that was going to fail anyway.
+  gate:
+    name: Approve publish
+    needs: [prepare, verify]
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - run: echo "Publishing ${{ needs.prepare.outputs.version }} to ${{ needs.prepare.outputs.registry }}"
+
+  images:
+    name: Publish ${{ matrix.component }}
+    needs: [prepare, gate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to GHCR
+      id-token: write # keyless signing for the provenance attestation
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.prepare.outputs.components) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compose the image tags
+        id: tags
+        run: |
+          set -euo pipefail
+          image="${{ needs.prepare.outputs.registry }}/${{ matrix.component }}"
+          while read -r t; do [ -n "$t" ] && echo "$image:$t"; done \
+            <<< "${{ needs.prepare.outputs.version_tags }}" > /tmp/tags
+          { echo "image=$image"; echo "list<<EOF"; cat /tmp/tags; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          cat /tmp/tags
+
+      # linux/amd64 only, deliberately: the worker image bakes OpenTofu with three provider plugins,
+      # Ansible, Helm and kubectl, and the libvirt path is amd64 in practice. Cross-building that
+      # under QEMU emulation would dominate the pipeline for a platform nobody runs. Adding arm64 is
+      # one entry in `platforms` when there is a reason to.
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Containerfile.${{ matrix.component }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tags.outputs.list }}
+          # Threaded into the Go binaries' -ldflags and the image's OCI labels, so a pulled image
+          # names the commit it came from. Same three args `make images` passes.
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.version }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ needs.prepare.outputs.date }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+          provenance: false # the attestation below is the real one; buildkit's inline blob is not
+
+      # Ties the published digest to this workflow, this commit and this runner - keyless, no secret
+      # to manage, and verifiable with `gh attestation verify`. It is what makes "pin by digest"
+      # (docs/deploy/releasing.md) more than a convention.
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ steps.tags.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      # Matrix jobs cannot share outputs, so each one leaves its digest behind for the release body.
+      - name: Record the digest
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ matrix.component }} ${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.component }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.component }}
+          path: /tmp/digests/${{ matrix.component }}
+          retention-days: 1
+
+  release:
+    name: GitHub Release
+    needs: [prepare, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      # The digest table goes ABOVE the generated notes: the notes say what changed, this says what
+      # to actually pull, and a digest is the only reference that cannot be moved out from under you.
+      - name: Compose the release body
+        run: |
+          set -euo pipefail
+          reg="${{ needs.prepare.outputs.registry }}"
+          {
+            echo "## Images"
+            echo
+            echo '| Component | Pull by digest |'
+            echo '|---|---|'
+            for f in /tmp/digests/*; do
+              c=$(cut -d' ' -f1 "$f"); d=$(cut -d' ' -f2 "$f")
+              echo "| \`$c\` | \`$reg/$c@$d\` |"
+            done
+            echo
+            echo "Tagged \`${{ needs.prepare.outputs.version }}\`. Verify provenance with:"
+            echo
+            echo '```'
+            echo "gh attestation verify oci://$reg/api:${{ needs.prepare.outputs.version }} -R ${{ github.repository }}"
+            echo '```'
+            echo
+            echo "Deploy with the Helm chart (released separately, see [releasing.md](https://github.com/${{ github.repository }}/blob/main/docs/deploy/releasing.md))."
+          } > /tmp/body.md
+          cat /tmp/body.md
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          args=(--notes-file /tmp/body.md --generate-notes --verify-tag)
+          [ "${{ needs.prepare.outputs.prerelease }}" = "true" ] && args+=(--prerelease)
+          if [ "${{ needs.prepare.outputs.platform }}" = "true" ]; then
+            args+=(--title "KubeHarbor ${{ needs.prepare.outputs.version }}")
+          else
+            args+=(--title "${GITHUB_REF_NAME}")
+          fi
+          gh release create "${GITHUB_REF_NAME}" "${args[@]}"
+
+  # Records what was published, as a GitHub Deployment against the `ghcr-images` environment -
+  # declaring `environment:` on a job is what creates the record, so the Environments tab becomes an
+  # accurate ledger of which version went out when.
+  #
+  # It records; it does not deploy. This platform runs as Podman containers inside WSL2, which a
+  # GitHub-hosted runner cannot reach, and giving CI a credential that COULD reach it would put a
+  # GitHub-triggered process next to the libvirt socket and every tenant's secrets. The real
+  # deployment step is a documented seam, not a wired one - see docs/deploy/releasing.md.
+  record:
+    name: Record deployment
+    needs: [prepare, images, release]
+    runs-on: ubuntu-latest
+    environment:
+      name: ghcr-images
+      url: https://github.com/${{ github.repository }}/pkgs/container/kaas-demo%2Fapi
+    steps:
+      - run: |
+          echo "### Published ${{ needs.prepare.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Components: \`$(echo '${{ needs.prepare.outputs.components }}' | tr -d '[]"' )\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Registry: \`${{ needs.prepare.outputs.registry }}\`" >> "$GITHUB_STEP_SUMMARY"

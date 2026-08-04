@@ -6,8 +6,17 @@ description: |
   plus (optionally) the Postgres that holds desired state and the durable job queue.
 type: application
 
-# The chart version tracks the deployment surface; appVersion tracks the platform itself. Both are
-# bumped by hand - this is a demo chart, not a released artifact.
+# Two versions, on two independent tag lines - see docs/deploy/releasing.md.
+#
+# `version` is the CHART's own: the deployment surface (templates, values, defaults). Bump it by
+# hand here whenever that surface changes, and release it by pushing `chart-v<version>`. It is the
+# only version in the repo that nothing else mirrors.
+#
+# `appVersion` is the PLATFORM this chart deploys, and it is a MIRROR of the root VERSION file -
+# never edit it directly, run `make bump VERSION=x.y.z`. It is load-bearing rather than
+# informational: `kaas.image` (templates/_helpers.tpl) resolves every image tag from it, so a
+# drifted appVersion makes `helm install` pull a platform nobody released. `make release-check`,
+# which CI runs on every PR, is what keeps them in step.
 version: 0.1.0
 appVersion: "0.1.0"
 

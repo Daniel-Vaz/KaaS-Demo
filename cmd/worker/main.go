@@ -21,10 +21,14 @@ import (
 
 	"github.com/Daniel-Vaz/KaaS-demo/internal/app"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/domain"
+	"github.com/Daniel-Vaz/KaaS-demo/internal/version"
 )
 
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	// Same first line as the API: the worker's version must be readable from its logs alone,
+	// because it is the replica that will be blamed for a bad reconcile.
+	log.Info("kaas worker", "version", version.String())
 
 	a, err := app.New(log)
 	if err != nil {

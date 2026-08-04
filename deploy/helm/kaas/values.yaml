@@ -21,10 +21,25 @@ fullnameOverride: ""
 providers: real
 
 image:
-  # Where the four images (api, web, worker, shell) were pushed. Locally:
+  # Where the five images (api, web, worker, shell, nodessh) live. The default is where the release
+  # workflow publishes them, so a released chart installs with no image config at all. Point it
+  # elsewhere for a local build:
   #   make images-push REGISTRY=localhost:5000/kaas
-  registry: ghcr.io/dvaz/kaas-demo
-  tag: latest
+  registry: ghcr.io/daniel-vaz/kaas-demo
+
+  # EMPTY ON PURPOSE. Left empty, every component is pulled at the chart's own appVersion - which is
+  # the platform version this chart was released against, so `helm install --version X` gets a
+  # matching, tested set. Setting it here pins ALL five components to one tag and overrides
+  # appVersion; that is the rollback / local-build / nightly path, not the default one.
+  tag: ""
+
+  # Per-component overrides, most specific of the three. The hotfix path: a `worker-v1.4.1` tag
+  # republishes just that image, and this is how you take it without moving the other four.
+  #   tags:
+  #     worker: 1.4.1
+  # Components: api, web, worker, shell, nodessh. See docs/deploy/releasing.md.
+  tags: {}
+
   pullPolicy: IfNotPresent
   pullSecrets: []
 

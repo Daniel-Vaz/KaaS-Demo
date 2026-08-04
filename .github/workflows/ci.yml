@@ -2,6 +2,10 @@
 # Ansible `--syntax-check` do locally, run on every push to main and every PR. Each language/tool
 # gets its own job so failures are isolated and the checks run in parallel. Nothing here needs a
 # hypervisor, a database or secrets - it is the fake/offline half of the build.
+#
+# It is also `workflow_call`-able, and the release workflows call it: a release re-runs this exact
+# gate at the tagged commit before anything is published. That is deliberately a call rather than a
+# copy - a release must not be able to pass a weaker set of checks than a PR.
 name: CI
 
 on:
@@ -9,16 +13,32 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
-# A newer push to the same branch/PR supersedes an in-flight run.
+# A newer push to the same branch/PR supersedes an in-flight run. Keyed on the calling workflow too,
+# so a release's nested CI run is never cancelled by an unrelated push to the same ref.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
+  # The version drift check. VERSION is the platform version's single source of truth and both
+  # Chart.yaml's appVersion and the portal's package.json mirror it; a drifted appVersion silently
+  # makes the chart pull image tags nobody published. Catching that on the PR is the whole point -
+  # by tag-push time the mistake is already a bad release. See docs/deploy/releasing.md.
+  version:
+    name: Version (no drift)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - run: make release-check
+
   go:
     name: Go (build · vet · test · fmt)
     runs-on: ubuntu-latest

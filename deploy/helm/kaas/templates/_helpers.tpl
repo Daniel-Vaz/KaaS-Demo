@@ -33,9 +33,23 @@ app.kubernetes.io/instance: {{ .ctx.Release.Name }}
 app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
-{{/* Image reference for one component. */}}
+{{/*
+Image reference for one component.
+
+Tag precedence, most specific first:
+
+  1. image.tags.<component>  a single component pinned to a different version. This is the HOTFIX
+                             path - a `worker-v1.4.1` tag republishes one image, and this is how a
+                             deployment consumes it without moving everything else.
+  2. image.tag               every component pinned together (a nightly, a local build, a rollback).
+  3. .Chart.AppVersion       the DEFAULT, and the reason the chart is releasable at all: a chart
+                             pulled at version X deploys the platform it was built against, with no
+                             --set at all. Never give image.tag a non-empty default in values.yaml -
+                             that shadows this and turns appVersion into dead config.
+*/}}
 {{- define "kaas.image" -}}
-{{- printf "%s/%s:%s" (trimSuffix "/" .ctx.Values.image.registry) .component (default .ctx.Chart.AppVersion .ctx.Values.image.tag) -}}
+{{- $tag := default (default .ctx.Chart.AppVersion .ctx.Values.image.tag) (get (default (dict) .ctx.Values.image.tags) .component) -}}
+{{- printf "%s/%s:%s" (trimSuffix "/" .ctx.Values.image.registry) .component $tag -}}
 {{- end -}}
 
 {{/* The Secret holding every credential - either the one we render or the user's own. */}}

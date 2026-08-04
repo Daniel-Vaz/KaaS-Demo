@@ -1,0 +1,189 @@
+# Publishes the Helm chart, on its own tag line and its own version. Triggered only by a
+# `chart-vX.Y.Z` push. See docs/deploy/releasing.md.
+#
+# The chart is versioned INDEPENDENTLY of the platform because it changes on a different rhythm: a
+# template fix, a new value, a better default are all reasons to cut a chart without rebuilding a
+# single image, and a platform release is usually no reason to touch the chart at all. What ties the
+# two together is the chart's `appVersion`, which is the platform version it deploys and the tag
+# `kaas.image` resolves every image from (templates/_helpers.tpl).
+#
+# Which is why the one guard that matters here is that appVersion names a platform release that
+# EXISTS. Publishing a chart against images that were never built produces an install that fails at
+# ImagePullBackOff, on someone else's cluster, long after the mistake.
+name: Release chart
+
+on:
+  push:
+    tags:
+      - 'chart-v*.*.*'
+
+concurrency:
+  group: release-chart-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare (parse tag · guard)
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+      app_version: ${{ steps.parse.outputs.app_version }}
+      prerelease: ${{ steps.parse.outputs.prerelease }}
+      registry: ${{ steps.parse.outputs.registry }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the appVersion guard resolves other tags; the ancestry guard needs main
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Parse the tag
+        id: parse
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          [[ "$tag" =~ ^chart-v(.+)$ ]] || { echo "::error::tag '$tag' is not chart-vX.Y.Z"; exit 1; }
+          version="${BASH_REMATCH[1]}"
+
+          chart_version=$(scripts/version.py --chart-version)
+          if [ "$version" != "$chart_version" ]; then
+            echo "::error::${tag} says ${version}, but Chart.yaml says ${chart_version} - bump the 'version:' key in deploy/helm/kaas/Chart.yaml, commit, and re-tag"
+            exit 1
+          fi
+
+          app_version=$(python3 -c "import re,pathlib;print(re.search(r'^appVersion:[ \t]*\"?([^\"\s]+)', pathlib.Path('deploy/helm/kaas/Chart.yaml').read_text(), re.M).group(1))")
+
+          prerelease=false
+          [[ "$version" == *-* ]] && prerelease=true
+
+          registry="ghcr.io/$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+
+          {
+            echo "version=$version"
+            echo "app_version=$app_version"
+            echo "prerelease=$prerelease"
+            echo "registry=$registry"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Releasing chart $version (deploys platform $app_version)"
+
+      # The guard this workflow exists for. `git rev-parse` is enough - if `v<appVersion>` was
+      # pushed, release.yml published those images or failed loudly; there is no third state.
+      - name: Guard - appVersion names a released platform version
+        run: |
+          set -euo pipefail
+          app="${{ steps.parse.outputs.app_version }}"
+          if ! git rev-parse -q --verify "refs/tags/v${app}" >/dev/null; then
+            echo "::error::Chart.yaml appVersion is ${app}, but no v${app} tag exists - release the platform first, or correct appVersion with \`make bump\`"
+            exit 1
+          fi
+          echo "v${app} exists - the chart's images have been published"
+
+      - name: Guard - the tag is an ancestor of main
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::${GITHUB_REF_NAME} points at a commit that is not on main"; exit 1
+          fi
+
+  verify:
+    name: Verify
+    needs: prepare
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  gate:
+    name: Approve publish
+    needs: [prepare, verify]
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - run: echo "Publishing chart ${{ needs.prepare.outputs.version }} to ${{ needs.prepare.outputs.registry }}/charts"
+
+  publish:
+    name: Publish chart
+    needs: [prepare, gate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # attach the tarball to the release
+      packages: write # push the OCI chart to GHCR
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Same three steps `make chart-package` runs, so the published tarball and a locally packaged
+      # one are the same artifact. `dependency update` vendors the Vault subchart (there is no
+      # Chart.lock in the tree) - without it both lint and template fail.
+      - name: Package
+        run: |
+          set -euo pipefail
+          helm dependency update deploy/helm/kaas
+          helm lint deploy/helm/kaas
+          helm template kaas deploy/helm/kaas --set providers=fake >/dev/null
+          mkdir -p dist
+          helm package deploy/helm/kaas --destination dist
+          (cd dist && sha256sum kaas-${{ needs.prepare.outputs.version }}.tgz > kaas-${{ needs.prepare.outputs.version }}.tgz.sha256)
+          ls -l dist
+
+      # OCI rather than a gh-pages index: it sits next to the images, under the same auth, and needs
+      # no second publish path to keep consistent. `helm push` derives the final repository name from
+      # the chart, so the destination is the PARENT path - the chart lands at <registry>/charts/kaas.
+      - name: Push to GHCR
+        run: |
+          helm push "dist/kaas-${{ needs.prepare.outputs.version }}.tgz" \
+            "oci://${{ needs.prepare.outputs.registry }}/charts"
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          reg="${{ needs.prepare.outputs.registry }}"
+          ver="${{ needs.prepare.outputs.version }}"
+          app="${{ needs.prepare.outputs.app_version }}"
+          {
+            echo "Helm chart \`$ver\`, deploying KubeHarbor **$app**."
+            echo
+            echo '```bash'
+            echo "helm install kaas oci://$reg/charts/kaas --version $ver"
+            echo '```'
+            echo
+            echo "Images are resolved from the chart's \`appVersion\` ($app), so no \`--set image.*\` is needed."
+            echo "See [releasing.md](https://github.com/${{ github.repository }}/blob/main/docs/deploy/releasing.md)."
+          } > /tmp/body.md
+
+          args=(--notes-file /tmp/body.md --generate-notes --verify-tag --title "kaas chart $ver")
+          [ "${{ needs.prepare.outputs.prerelease }}" = "true" ] && args+=(--prerelease)
+          gh release create "${GITHUB_REF_NAME}" "${args[@]}" \
+            "dist/kaas-$ver.tgz" "dist/kaas-$ver.tgz.sha256"
+
+  # See the same job in release.yml: this records what was published, it does not deploy anything.
+  record:
+    name: Record deployment
+    needs: [prepare, publish]
+    runs-on: ubuntu-latest
+    environment:
+      name: ghcr-chart
+      url: https://github.com/${{ github.repository }}/pkgs/container/kaas-demo%2Fcharts%2Fkaas
+    steps:
+      - run: |
+          {
+            echo "### Published chart ${{ needs.prepare.outputs.version }}"
+            echo ""
+            echo "Deploys platform \`${{ needs.prepare.outputs.app_version }}\`"
+            echo ""
+            echo '```bash'
+            echo "helm install kaas oci://${{ needs.prepare.outputs.registry }}/charts/kaas --version ${{ needs.prepare.outputs.version }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

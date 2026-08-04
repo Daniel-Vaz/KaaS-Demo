@@ -1,8 +1,24 @@
 .PHONY: help up down logs ps restart rebuild psql nuke up-fake down-fake logs-fake \
         up-scale down-scale logs-scale ps-scale helm-lint helm-template images images-push \
-        catalog-check catalog-update \
+        catalog-check catalog-update version release-check bump chart-package \
         _clusters-down build test vet run-api run-worker golden-image golden-image-vsphere golden-image-proxmox golden-images tidy clean \
         web-install web-dev web-build kubeconfig
+
+# ---- Version and build stamping --------------------------------------------------------
+#
+# The root VERSION file is the platform version's single source of truth; Chart.yaml's appVersion
+# and web/portal/package.json mirror it, and `make release-check` (run by CI on every PR) is what
+# keeps them from drifting. Releases are cut by pushing a tag - see docs/deploy/releasing.md.
+#
+# VERSION/COMMIT/DATE are linked into every Go binary through internal/version, so a running API can
+# name itself on GET /version. An unstamped `go build ./...` still works; it just reports "dev".
+VERSION      ?= $(shell cat VERSION 2>/dev/null || echo dev)
+COMMIT       ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+DATE         ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+MODULE       := github.com/Daniel-Vaz/KaaS-demo
+LDFLAGS      := -X $(MODULE)/internal/version.Version=$(VERSION) \
+                -X $(MODULE)/internal/version.Commit=$(COMMIT) \
+                -X $(MODULE)/internal/version.Date=$(DATE)
 
 # Container lifecycle is driven by Podman Compose.
 COMPOSE      ?= podman compose
@@ -63,6 +79,12 @@ help: ## Show this help
 	@echo "  Catalog add-on versions (internal/catalog/catalog.json, needs helm + python3 on the host):"
 	@echo "    make catalog-check   Report add-ons with a newer chart version upstream (no changes)"
 	@echo "    make catalog-update  Rewrite catalog.json to the latest upstream chart versions"
+	@echo ""
+	@echo "  Releases (tag-driven; see docs/deploy/releasing.md):"
+	@echo "    make version                 Print the platform version and the chart version"
+	@echo "    make release-check           Verify VERSION, Chart.yaml appVersion and package.json agree"
+	@echo "    make bump VERSION=1.4.0      Rewrite the platform version everywhere it is mirrored"
+	@echo "    make chart-package           Package the Helm chart into dist/ (what the release job pushes)"
 	@echo ""
 	@echo "  Local dev (no containers):"
 	@echo "    make build test vet | run-api | run-worker | tidy | clean"
@@ -163,8 +185,14 @@ ps-scale: ## Show the scaled stack's containers (one line per replica)
 
 HELM         ?= helm
 CHART        := deploy/helm/kaas
-REGISTRY     ?= localhost/kaas
-IMAGE_TAG    ?= latest
+# Where a release lands. The release workflow pushes here; a local `make images-push` can point
+# somewhere else (REGISTRY=localhost:5000/kaas). IMAGE_TAG defaults to the VERSION file rather than
+# `latest` on purpose - a mutable tag is not something you can roll back to.
+REGISTRY     ?= ghcr.io/daniel-vaz/kaas-demo
+IMAGE_TAG    ?= $(VERSION)
+# The five images the chart deploys. `lb` is compose-only (deploy/compose.scale.yaml) and is not
+# published - on Kubernetes a Service does its job.
+COMPONENTS   := api web worker shell nodessh
 
 helm-lint: ## Lint the chart and render it in every mode (fake / real-remote / real-local)
 	$(HELM) lint $(CHART)
@@ -185,14 +213,40 @@ catalog-check: ## Report which catalog add-on charts have a newer version upstre
 catalog-update: ## Rewrite catalog.json add-on entries to the latest upstream chart versions
 	python3 scripts/update-catalog-versions.py --write
 
+# The build args every image takes: they become the `-ldflags -X` values baked into the Go binaries
+# and the org.opencontainers.image.* labels on the image itself, so a pulled image can be traced
+# back to the commit that produced it. CI passes exactly the same set (.github/workflows/release.yml).
+IMAGE_ARGS = --build-arg VERSION=$(IMAGE_TAG) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE)
+
 images: ## Build the container images for a registry (REGISTRY=... IMAGE_TAG=...)
-	for c in api web worker shell nodessh; do \
-		podman build -f deploy/Containerfile.$$c -t $(REGISTRY)/$$c:$(IMAGE_TAG) . || exit 1; \
+	for c in $(COMPONENTS); do \
+		podman build -f deploy/Containerfile.$$c $(IMAGE_ARGS) -t $(REGISTRY)/$$c:$(IMAGE_TAG) . || exit 1; \
 	done
-	@echo "  built $(REGISTRY)/{api,web,worker,shell,nodessh}:$(IMAGE_TAG)"
+	@echo "  built $(REGISTRY)/{$$(echo '$(COMPONENTS)' | tr ' ' ',')}:$(IMAGE_TAG)"
 
 images-push: images ## Build and push the images the chart pulls
-	for c in api web worker shell nodessh; do podman push $(REGISTRY)/$$c:$(IMAGE_TAG) || exit 1; done
+	for c in $(COMPONENTS); do podman push $(REGISTRY)/$$c:$(IMAGE_TAG) || exit 1; done
+
+# ---- Releases (see docs/deploy/releasing.md) -------------------------------------------
+
+version: ## Print the platform version and the chart version
+	@scripts/version.py --check
+
+release-check: ## Verify VERSION, Chart.yaml appVersion and package.json all agree (run by CI)
+	@scripts/version.py --check
+
+bump: ## Rewrite the platform version everywhere it is mirrored: make bump VERSION=1.4.0
+	@scripts/version.py --set $(VERSION)
+
+# Package the chart exactly as the release job does, so `make chart-package` locally and the
+# published artifact are the same tarball. The Vault subchart is vendored first (there is no
+# Chart.lock in the tree), which is also what `helm template` needs.
+chart-package: ## Package the Helm chart into dist/
+	@$(HELM) dependency update $(CHART)
+	@$(HELM) lint $(CHART)
+	@mkdir -p dist
+	@$(HELM) package $(CHART) --destination dist
+	@echo "  packaged dist/kaas-$$(scripts/version.py --chart-version).tgz"
 
 # ---- Containers: FAKE mode (no KVM) ----------------------------------------------------
 
@@ -226,8 +280,10 @@ web-build: ## Production build of the portal (type-check + vite build)
 
 # ---- Local dev (no containers) ---------------------------------------------------------
 
+# -ldflags stamps internal/version, so a locally built binary reports its commit instead of "dev".
+# `go build ./...` on its own still works everywhere - the flags are an addition, not a requirement.
 build:
-	go build ./...
+	go build -ldflags "$(LDFLAGS)" ./...
 
 test:
 	go test ./...

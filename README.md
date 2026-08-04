@@ -6,6 +6,10 @@
 
 ### Kubernetes Without the Rough Seas
 
+[![CI](https://github.com/Daniel-Vaz/KaaS-Demo/actions/workflows/ci.yml/badge.svg)](https://github.com/Daniel-Vaz/KaaS-Demo/actions/workflows/ci.yml)
+[![Release](https://github.com/Daniel-Vaz/KaaS-Demo/actions/workflows/release.yml/badge.svg)](https://github.com/Daniel-Vaz/KaaS-Demo/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/Daniel-Vaz/KaaS-Demo?sort=semver&label=release)](https://github.com/Daniel-Vaz/KaaS-Demo/releases)
+
 A self-hosted **Kubernetes-as-a-Service** platform. Request a cluster from a web portal and
 KubeHarbor builds it end to end - virtual machines, a `kubeadm` control plane, a CNI, storage,
 ingress, DNS, monitoring and more - then keeps it healthy for you. You get a full cluster you're
@@ -29,6 +33,10 @@ control plane with no hypervisor at all, for demos and development.
 > ```bash
 > make up-fake      # portal at http://localhost:8080 - sign in as admin / admin
 > ```
+> Already have a Kubernetes cluster? Install a published release onto it:
+> ```bash
+> helm install kaas oci://ghcr.io/daniel-vaz/kaas-demo/charts/kaas --set providers=fake
+> ```
 
 ## Documentation
 
@@ -37,6 +45,7 @@ control plane with no hypervisor at all, for demos and development.
 | **Understand what KubeHarbor is and why it exists** | [Why KubeHarbor](docs/concepts/why-kubeharbor.md) · [Architecture](docs/concepts/architecture.md) |
 | **Deploy and configure the platform** | [Operator guide](docs/deploy/README.md) |
 | **Use the web portal** | [Portal user guide](docs/portal/README.md) |
+| **Install, pin or cut a release** | [Releasing](docs/deploy/releasing.md) |
 | **Browse everything** | [Documentation index](docs/README.md) |
 
 ## What you get
@@ -65,6 +74,10 @@ make up-scale    # scaled real mode: N replicas of each tier behind a load balan
 make down        # delete running clusters, then stop the stack
 make help        # every target
 ```
+
+Releases are cut by pushing a tag - `v1.4.0` for the platform's five images, `chart-v0.3.0` for the
+Helm chart. `make release-check` verifies the version is consistent before you do; the whole workflow
+is in [Releasing](docs/deploy/releasing.md).
 
 The portal is at **http://localhost:8080**; the JSON + SSE API is on **http://localhost:8081**.
 Real mode needs a `.env` - see [`.env.example`](.env.example) and the [operator

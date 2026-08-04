@@ -27,6 +27,8 @@ Running KubeHarbor for others.
 - [**Helm / Kubernetes**](deploy/helm.md) - deploy KubeHarbor onto an existing cluster.
 - [**Configuration reference**](deploy/configuration.md) - every environment variable, by area.
 - [**Golden images**](deploy/golden-images.md) - building the VM images with Packer.
+- [**Releasing**](deploy/releasing.md) - the tag-driven release workflow, and how to install a
+  published version.
 
 **Infrastructure providers**
 

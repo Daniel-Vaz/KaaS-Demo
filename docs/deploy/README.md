@@ -9,7 +9,7 @@ and every knob you can turn.
 |---|---|---|
 | **Fake mode** | You want to see the platform, develop, or demo it - no hypervisor needed | [Fake mode](fake-mode.md) |
 | **Podman Compose** | You're running on one machine (a homelab box, a WSL2 host) | [Compose](compose.md) |
-| **Helm / Kubernetes** | You already have a cluster to host KubeHarbor on | [Helm](helm.md) |
+| **Helm / Kubernetes** | You already have a cluster to host KubeHarbor on | [Helm](helm.md) · [Releasing](releasing.md) |
 
 All three run the **same** platform - the same Go binaries, reconcile loop, and portal. They differ
 only in how the containers are orchestrated and where the hypervisor is.
@@ -61,6 +61,19 @@ KubeHarbor works out of the box, and layers in these when you configure them:
   kubeconfig and signs every session - rotate it and the stored secrets no longer decrypt. Keep it
   stable in `.env`.
 - **DB migrations are forward-only** and run automatically at startup under an advisory lock.
+
+## Versions, upgrades and rollbacks
+
+KubeHarbor is published as five container images and a Helm chart, released by pushing a git tag. The
+chart resolves its images from its own `appVersion`, so installing a version is all you do:
+
+```bash
+helm install kaas oci://ghcr.io/daniel-vaz/kaas-demo/charts/kaas --version 0.3.0
+```
+
+A running deployment names itself at `GET /api/version` and in the portal's sidebar footer. How to cut
+a release, what to bump before tagging, how to pin or roll back, and how to verify a published image's
+provenance are all in [**Releasing**](releasing.md).
 
 ## The full configuration surface
 

@@ -13,6 +13,20 @@ COPY web/portal/ ./
 RUN npm run build
 
 FROM docker.io/library/nginx:alpine
+# Build identity. Unlike the Go images this is labels only - the portal reads its version from the
+# API at runtime (GET /api/version) rather than baking one in, so the page always names the platform
+# it is actually talking to. See internal/version and docs/deploy/releasing.md.
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG DATE=unknown
+LABEL org.opencontainers.image.title="kaas-web" \
+      org.opencontainers.image.description="KubeHarbor portal (React SPA) served by nginx, proxying /api" \
+      org.opencontainers.image.source="https://github.com/Daniel-Vaz/KaaS-Demo" \
+      org.opencontainers.image.documentation="https://github.com/Daniel-Vaz/KaaS-Demo/blob/main/docs/README.md" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${COMMIT}" \
+      org.opencontainers.image.created="${DATE}" \
+      org.opencontainers.image.vendor="KubeHarbor"
 # The upgrade map must load at http-level (a sibling of default.conf under conf.d), so WebSocket
 # upgrades work for the cluster shell without breaking SSE. See deploy/nginx-upgrade-map.conf.
 COPY deploy/nginx-upgrade-map.conf /etc/nginx/conf.d/00-upgrade-map.conf

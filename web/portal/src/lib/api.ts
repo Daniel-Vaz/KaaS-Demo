@@ -51,6 +51,7 @@ import type {
   AddonValuesView,
   CustomCatalogView,
   CustomAddon,
+  VersionInfo,
 } from './types';
 
 // WorkloadRef identifies a workload for the detail/log/scale endpoints.
@@ -148,6 +149,10 @@ async function fetchYaml(path: string): Promise<string> {
 }
 
 export const api = {
+  // Which release the API is running, for the sidebar footer. Public, and read from the API rather
+  // than baked into this bundle at build time: the portal and the API are separate images, so a
+  // baked-in version would name the web image and not the platform the user is actually driving.
+  version: () => request<VersionInfo>('GET', '/version'),
   // auth / session
   me: () => request<User>('GET', '/auth/me'),
   // Public, and the only call the login page can make before it has a session: it says whether this

@@ -4,6 +4,12 @@
 *.out
 coverage.*
 
+# Release artifacts (`make chart-package`) and the vendored Vault subchart `helm dependency update`
+# fetches into the chart. Both are derived - the chart is released from its source, not from these.
+/dist/
+deploy/helm/kaas/charts/
+deploy/helm/kaas/Chart.lock
+
 # Local env / secrets
 .env
 *.pem

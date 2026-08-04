@@ -26,6 +26,7 @@ import type {
 const POLL_MS = 2000;
 
 export const qk = {
+  version: ['version'] as const,
   clusters: ['clusters'] as const,
   cluster: (id: string) => ['clusters', id] as const,
   capacity: ['capacity'] as const,
@@ -136,6 +137,18 @@ export function useCatalog() {
     queryKey: qk.catalog,
     queryFn: api.getCatalog,
     staleTime: 5 * 60 * 1000,
+  });
+}
+
+// The API's build identity, for the sidebar footer. Never refetched: a running process cannot
+// change its own version, and an upgrade replaces the page along with the pod. A failure is not
+// worth surfacing - the footer just stays empty.
+export function useVersion() {
+  return useQuery({
+    queryKey: qk.version,
+    queryFn: api.version,
+    staleTime: Infinity,
+    retry: false,
   });
 }
 

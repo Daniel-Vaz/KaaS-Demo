@@ -3,6 +3,19 @@
 # config because the resolver script rewrites the config in place at start-up, which a read-only
 # bind mount would not allow.
 FROM docker.io/library/nginx:alpine
+# Build identity. This image is compose-only (deploy/compose.scale.yaml) and is NOT published by the
+# release workflow - on Kubernetes a Service does its job - but it carries the same labels so a
+# locally built scaled stack is as traceable as a released one.
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG DATE=unknown
+LABEL org.opencontainers.image.title="kaas-lb" \
+      org.opencontainers.image.description="KubeHarbor compose load balancer (nginx over the web/api replicas)" \
+      org.opencontainers.image.source="https://github.com/Daniel-Vaz/KaaS-Demo" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${COMMIT}" \
+      org.opencontainers.image.created="${DATE}" \
+      org.opencontainers.image.vendor="KubeHarbor"
 # The WebSocket upgrade map, at http level - the shell WebSocket passes through this hop too.
 COPY deploy/nginx-upgrade-map.conf /etc/nginx/conf.d/00-upgrade-map.conf
 COPY deploy/nginx-lb.conf /etc/nginx/conf.d/default.conf

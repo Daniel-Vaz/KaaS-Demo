@@ -1,12 +1,28 @@
 # Build the API (control-plane JSON + SSE server) as a static binary in a minimal image. The
 # catalog (catalog.json) is compiled in via go:embed; migrations are read at runtime from
 # KAAS_MIGRATIONS_DIR (mounted by compose). The UI is the separate web portal (deploy/Containerfile.web).
+# Build identity, passed in by `make images` and by .github/workflows/release.yml. Declared before
+# the first FROM so both stages can pick them up (a global ARG still has to be re-declared inside
+# each stage that uses it). The defaults are what an unstamped local build gets - see
+# internal/version and docs/deploy/releasing.md.
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG DATE=unknown
+
 FROM docker.io/library/golang:1.26 AS build
+ARG VERSION
+ARG COMMIT
+ARG DATE
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /out/api ./cmd/api
+# -ldflags links the build identity into internal/version, which the API serves on GET /version.
+RUN CGO_ENABLED=0 go build \
+      -ldflags "-X github.com/Daniel-Vaz/KaaS-demo/internal/version.Version=${VERSION} \
+                -X github.com/Daniel-Vaz/KaaS-demo/internal/version.Commit=${COMMIT} \
+                -X github.com/Daniel-Vaz/KaaS-demo/internal/version.Date=${DATE}" \
+      -o /out/api ./cmd/api
 
 # Helm is bundled for the add-on values editor (KAAS_ADDON_VALUES=helm): `helm show values` reads
 # chart repos over the network, needs no cluster, and so runs API-side. The statically-linked helm
@@ -17,6 +33,20 @@ RUN curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" -o
  && tar -xzf /tmp/helm.tgz -C /tmp linux-amd64/helm
 
 FROM gcr.io/distroless/static-debian12
+ARG VERSION
+ARG COMMIT
+ARG DATE
+# Standard OCI annotations. `source` is what makes GHCR link the published package back to this
+# repository (and inherit its README and visibility); `revision` and `version` are what let anyone
+# holding a pulled image name the commit it came from without running it.
+LABEL org.opencontainers.image.title="kaas-api" \
+      org.opencontainers.image.description="KubeHarbor control-plane API (JSON + SSE)" \
+      org.opencontainers.image.source="https://github.com/Daniel-Vaz/KaaS-Demo" \
+      org.opencontainers.image.documentation="https://github.com/Daniel-Vaz/KaaS-Demo/blob/main/docs/README.md" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${COMMIT}" \
+      org.opencontainers.image.created="${DATE}" \
+      org.opencontainers.image.vendor="KubeHarbor"
 COPY --from=build /out/api /api
 COPY --from=build /tmp/linux-amd64/helm /usr/local/bin/helm
 # The schema migrations are BAKED IN, not only mounted: compose bind-mounts ../migrations over this
