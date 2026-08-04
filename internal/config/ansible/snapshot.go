@@ -2,6 +2,7 @@ package ansible
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -162,7 +163,7 @@ func (m *Manager) RestartKubelet(ctx context.Context, c *domain.Cluster, node do
 // this archive is produced by the platform's own playbook, so a traversing path means the payload
 // is not what it claims to be, and the right response to that is to stop.
 func untarGz(archive []byte, dir string) error {
-	zr, err := gzip.NewReader(strings.NewReader(string(archive)))
+	zr, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
 		return err
 	}
@@ -178,6 +179,14 @@ func untarGz(archive []byte, dir string) error {
 		}
 		if hdr.Typeflag != tar.TypeReg {
 			continue // the bundle's "./" directory entry, and nothing else we want
+		}
+		// Refuse the entry on its OWN name, before it is used to derive anything. Base() below
+		// would already strip a traversing prefix, but stripping is sanitizing, and the policy here
+		// is refusal: a "../" in a bundle the platform's own playbook wrote means the payload is not
+		// what it claims to be. Checking the raw name is also the form static analysis recognizes as
+		// the zipslip guard (CodeQL go/zipslip), which reading it through Base() is not.
+		if strings.Contains(hdr.Name, "..") || !filepath.IsLocal(filepath.Clean(hdr.Name)) {
+			return fmt.Errorf("unexpected archive entry %q", hdr.Name)
 		}
 		name := filepath.Base(filepath.Clean(hdr.Name))
 		if name == "." || name == ".." || name == string(filepath.Separator) {
