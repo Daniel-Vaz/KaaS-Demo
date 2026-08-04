@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Daniel-Vaz/KaaS-demo/internal/events"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/vault"
 )
 
@@ -89,4 +90,41 @@ func TestAuthAccessorMissingMountIsNotAnError(t *testing.T) {
 	if got != "" {
 		t.Fatalf("accessor = %q, want empty", got)
 	}
+}
+
+// recordingSink captures emitted events.
+type recordingSink struct{ got []events.Event }
+
+func (s *recordingSink) Emit(e events.Event) { s.got = append(s.got, e) }
+
+// Regression: every emit here used to omit ClusterID, and events.cluster_id is NOT NULL with a
+// foreign key to clusters - so EVERY one of them was rejected by Postgres and logged as "events:
+// persist ... violates foreign key constraint", which reads like a database fault. Two costs: a
+// cluster's Vault provisioning never reached its Activity tab, and the platform-scoped warnings
+// (notably authAccessor's) were swallowed entirely. Cluster-scoped messages must carry the ID;
+// platform-scoped ones must not reach the sink at all, because there is no platform timeline.
+func TestEmitRoutesClusterScopedToEventsAndPlatformScopedToLog(t *testing.T) {
+	sink := &recordingSink{}
+	c := &Client{events: sink}
+
+	c.emit("abc123", "info", "provisioned Vault path and policies for cluster \"dev\"")
+	c.emit("", "warn", "vault: auth mount has no accessor")
+	c.emit("", "info", "vault: provisioned the platform Vault mount")
+
+	if len(sink.got) != 1 {
+		t.Fatalf("emitted %d events, want 1 (only the cluster-scoped one)", len(sink.got))
+	}
+	if sink.got[0].ClusterID != "abc123" {
+		t.Fatalf("ClusterID = %q, want %q - an empty ID is an FK violation, not a no-op", sink.got[0].ClusterID, "abc123")
+	}
+	if sink.got[0].Source != "vault" {
+		t.Fatalf("Source = %q, want %q", sink.got[0].Source, "vault")
+	}
+}
+
+// A nil logger is the shape newTestClient (and the API's minter client) uses, so a platform-scoped
+// emit must not panic on it.
+func TestPlatformScopedEmitToleratesNilLogger(t *testing.T) {
+	c := &Client{}
+	c.emit("", "warn", "no logger, no sink, no panic")
 }

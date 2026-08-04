@@ -112,9 +112,27 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any,
 	return fmt.Errorf("hcvault: %s %s: %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(data)))
 }
 
-func (c *Client) emit(level, msg string) {
+// emit puts a message on a CLUSTER's activity timeline, or logs it when the message is
+// platform-scoped (clusterID ""). The split is forced by the schema: events.cluster_id is NOT NULL
+// and foreign-keyed to clusters ON DELETE CASCADE, so the events table is per-cluster by
+// construction and there is no platform-wide timeline to write to - the portal only ever renders an
+// Activity tab for one cluster. An emit with no cluster ID is therefore not a harmless no-op but a
+// guaranteed FK violation: the broker drops the message and logs a persist error that reads like a
+// real database fault. Logging is the honest home for those, and it keeps the authAccessor warning
+// below visible - the one message here whose whole purpose is to surface a silent misconfiguration.
+func (c *Client) emit(clusterID, level, msg string) {
+	if clusterID == "" {
+		if c.log != nil {
+			if level == "warn" {
+				c.log.Warn(msg)
+			} else {
+				c.log.Info(msg)
+			}
+		}
+		return
+	}
 	if c.events != nil {
-		c.events.Emit(events.Event{Source: "vault", Level: level, Message: msg})
+		c.events.Emit(events.Event{ClusterID: clusterID, Source: "vault", Level: level, Message: msg})
 	}
 }
 
@@ -161,7 +179,7 @@ func (c *Client) EnsurePlatform(ctx context.Context) error {
 			return err
 		}
 	}
-	c.emit("info", "provisioned the platform Vault mount, auth backend and admin policy")
+	c.emit("", "info", "vault: provisioned the platform Vault mount, auth backend and admin policy")
 	return nil
 }
 
@@ -186,7 +204,7 @@ func (c *Client) EnsureCluster(ctx context.Context, cl *domain.Cluster, eso vaul
 			return err
 		}
 	}
-	c.emit("info", fmt.Sprintf("provisioned Vault path and policies for cluster %q", cl.Name))
+	c.emit(cl.ID, "info", fmt.Sprintf("provisioned Vault path and policies for cluster %q", cl.Name))
 	return nil
 }
 
@@ -229,7 +247,9 @@ func (c *Client) ReleaseCluster(ctx context.Context, cl *domain.Cluster) error {
 			return err
 		}
 	}
-	c.emit("info", fmt.Sprintf("released Vault path and policies for cluster %q", cl.Name))
+	// The cluster row still exists here: releaseVault runs in PhaseDeleting, BEFORE DestroyCluster
+	// and before the row is dropped - so the FK holds, and ON DELETE CASCADE takes the event with it.
+	c.emit(cl.ID, "info", fmt.Sprintf("released Vault path and policies for cluster %q", cl.Name))
 	return nil
 }
 
@@ -355,7 +375,7 @@ func (c *Client) authAccessor(ctx context.Context) (string, error) {
 		// Not fatal: SyncAccess still writes entities, policies and groups, and only skips the
 		// login-time alias. But without the alias a user's login maps to no entity, so their
 		// policies never apply - warn rather than fail silently, which is how this stayed hidden.
-		c.emit("warn", fmt.Sprintf("vault: auth mount %q has no accessor - entity aliases skipped, logins will carry no cluster policies", strings.TrimSuffix(path, "/")))
+		c.emit("", "warn", fmt.Sprintf("vault: auth mount %q has no accessor - entity aliases skipped, logins will carry no cluster policies", strings.TrimSuffix(path, "/")))
 		return "", nil
 	}
 	return m.Accessor, nil
