@@ -7,6 +7,7 @@ and every knob you can turn.
 
 | Path | Use it when | Guide |
 |---|---|---|
+| **Browser demo** | You want to look at it right now, with nothing installed | [Browser demo](browser-demo.md) |
 | **Fake mode** | You want to see the platform, develop, or demo it - no hypervisor needed | [Fake mode](fake-mode.md) |
 | **Podman Compose** | You're running on one machine (a homelab box, a WSL2 host) | [Compose](compose.md) |
 | **Helm / Kubernetes** | You already have a cluster to host KubeHarbor on | [Helm](helm.md) · [Releasing](releasing.md) |

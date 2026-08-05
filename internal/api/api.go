@@ -24,7 +24,6 @@ import (
 	"github.com/Daniel-Vaz/KaaS-demo/internal/domain"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/kube"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/monitoring"
-	"github.com/Daniel-Vaz/KaaS-demo/internal/nodessh"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/security"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/shell"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/store"
@@ -670,32 +669,8 @@ func (s *Server) streamShell(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	term := shell.NewConn(ctx, conn)
-
-	if c.Phase != domain.PhaseReady {
-		shell.WriteError(term, fmt.Sprintf("cluster %q is not Ready (phase %s) - the shell opens once it is Ready", c.Name, c.Phase))
-		_ = conn.Close(websocket.StatusPolicyViolation, "not ready")
-		return
-	}
-	// The PTY runs as the actor's OWN per-user credential: a full-access actor gets a writer cert
-	// (cluster-admin via RBAC), a read-role group-mate a reader cert (RBAC-limited to reads - list yes,
-	// mutate no), so their kubectl acts as themselves. The readOnly flag is only needed by the fake
-	// backend, which has no real API server to enforce RBAC.
-	kc, readOnly, err := s.app.UserKubeconfig(r.Context(), actor, id)
-	if err != nil {
-		shell.WriteError(term, "kubeconfig not available yet: "+err.Error())
-		_ = conn.Close(websocket.StatusInternalError, "no kubeconfig")
-		return
-	}
-	if len(kc) == 0 {
-		shell.WriteError(term, "kubeconfig for this cluster is not ready yet - reconnect in a moment")
-		_ = conn.Close(websocket.StatusTryAgainLater, "kubeconfig empty")
-		return
-	}
-	if err := s.app.Shell.Serve(ctx, c, kc, readOnly, term); err != nil {
-		s.log.Warn("shell session", "cluster", c.Name, "err", err)
-	}
-	_ = conn.Close(websocket.StatusNormalClosure, "")
+	status, reason := s.RunShellSession(ctx, actor, c, shell.NewConn(ctx, conn))
+	_ = conn.Close(status, reason)
 }
 
 // streamNodeSSH upgrades to a WebSocket and hands the browser an SSH session as the kaas user on one
@@ -718,26 +693,8 @@ func (s *Server) streamNodeSSH(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	term := shell.NewConn(ctx, conn)
-
-	if n.IP == "" {
-		shell.WriteError(term, fmt.Sprintf("node %q has no IP yet - it is still being provisioned; reconnect once it has an address", n.VMName))
-		_ = conn.Close(websocket.StatusPolicyViolation, "no node ip")
-		return
-	}
-
-	s.app.AuditNodeSSH(c, actor, n, "opened")
-	// Record the session in the Operations history and capture the commands typed during it: the
-	// recorder tees term's keystrokes (see internal/nodessh), transparent to the session, and the op
-	// is completed with the command list on close.
-	opID := s.app.BeginNodeSSHOperation(actor, c, n)
-	rec := nodessh.NewCommandRecorder(term)
-	if err := s.app.NodeSSH.Serve(ctx, c, n, rec); err != nil {
-		s.log.Warn("node ssh session", "cluster", c.Name, "node", n.VMName, "err", err)
-	}
-	s.app.EndNodeSSHOperation(opID, rec.Commands(), rec.Truncated())
-	s.app.AuditNodeSSH(c, actor, n, "closed")
-	_ = conn.Close(websocket.StatusNormalClosure, "")
+	status, reason := s.RunNodeSSHSession(ctx, actor, c, n, shell.NewConn(ctx, conn))
+	_ = conn.Close(status, reason)
 }
 
 // --- Workloads ---------------------------------------------------------------
@@ -868,27 +825,16 @@ func (s *Server) streamWorkloadLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	term := shell.NewConn(ctx, conn)
-
-	pod := r.URL.Query().Get("pod")
-	if pod == "" {
-		shell.WriteError(term, "a pod query parameter is required")
-		_ = conn.Close(websocket.StatusPolicyViolation, "no pod")
-		return
-	}
 	tail, _ := strconv.Atoi(r.URL.Query().Get("tail"))
-	follow := r.URL.Query().Get("follow") == "1" || r.URL.Query().Get("follow") == "true"
 	ref := kube.LogRef{
 		Namespace: r.PathValue("namespace"),
-		Pod:       pod,
+		Pod:       r.URL.Query().Get("pod"),
 		Container: r.URL.Query().Get("container"),
 		TailLines: tail,
-		Follow:    follow,
+		Follow:    r.URL.Query().Get("follow") == "1" || r.URL.Query().Get("follow") == "true",
 	}
-	if err := s.app.WorkloadLogs(ctx, actor, id, ref, wsLogSink{term}); err != nil {
-		shell.WriteError(term, err.Error())
-	}
-	_ = conn.Close(websocket.StatusNormalClosure, "")
+	status, reason := s.RunLogSession(ctx, actor, id, ref, shell.NewConn(ctx, conn))
+	_ = conn.Close(status, reason)
 }
 
 // wsLogSink adapts the browser WebSocket to kube.LogSink, forwarding log bytes as binary frames.

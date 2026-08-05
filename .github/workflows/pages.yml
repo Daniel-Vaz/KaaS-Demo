@@ -1,0 +1,80 @@
+# Publishes the browser demo to GitHub Pages: the portal, plus the whole control plane compiled to
+# WebAssembly, as a static site with no backend behind it (see docs/demo.md and cmd/demo-wasm).
+#
+# Two things are deliberate:
+#
+#   - It runs the ordinary CI gate first, by CALLING ci.yml rather than trusting the push. The demo
+#     is the most public thing this repo produces; publishing a commit that does not build is worse
+#     than not publishing. Same reasoning - and the same mechanism - as the release workflows.
+#   - It publishes from `main` only. There is nothing to promote and no environment to approve: the
+#     artifact is a static site containing no credentials and reaching nothing, which is exactly what
+#     makes it safe to redeploy on every push (unlike the release workflow's image publishing, which
+#     is gated on the `release` environment).
+#
+# One-time setup: Settings → Pages → Source = "GitHub Actions".
+name: Pages (browser demo)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Pages allows one deployment at a time. A newer commit supersedes an in-flight run, but an
+# in-flight DEPLOYMENT is left to finish - cancelling mid-deploy can leave the site half-published.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build the static demo
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/portal/package-lock.json
+      - uses: actions/configure-pages@v6
+        id: pages
+
+      # See the CI job for --legacy-peer-deps.
+      - run: npm ci --legacy-peer-deps
+        working-directory: web/portal
+
+      # `make demo-build` builds the wasm module into the portal's public/, bundles the portal with
+      # VITE_DEMO=1, and writes the 404.html fallback a single-page app needs on Pages. VITE_BASE
+      # comes from configure-pages, so this works for a project site (/<repo>/) and a user site (/)
+      # without the path being hardcoded anywhere.
+      - name: Build
+        run: make demo-build VITE_BASE="${{ steps.pages.outputs.base_path }}/"
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: web/portal/dist
+
+  deploy:
+    name: Deploy to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write # publish the artifact
+      id-token: write # OIDC token the deploy action exchanges for one
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v5

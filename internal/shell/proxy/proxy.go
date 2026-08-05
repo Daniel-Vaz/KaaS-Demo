@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"strings"
 
 	"github.com/Daniel-Vaz/KaaS-demo/internal/domain"
@@ -39,10 +38,7 @@ func New(pool *execagent.Pool, token string, log *slog.Logger) *Backend {
 // viewer, chosen by the API), and the viewer's RBAC enforces read-only at the cluster API server -
 // so a real PTY needs no client-side restriction.
 func (b *Backend) Serve(ctx context.Context, c *domain.Cluster, kubeconfig []byte, _ bool, term shell.Conn) error {
-	opts := &websocket.DialOptions{}
-	if b.token != "" {
-		opts.HTTPHeader = http.Header{"Authorization": {"Bearer " + b.token}}
-	}
+	opts := execagent.DialOptions(b.token)
 	// Round-robin over the agents, failing over to the next when one won't answer. A session is
 	// pinned to whichever agent picks it up (the PTY lives there), but nothing outlives it.
 	candidates := b.pool.Candidates()

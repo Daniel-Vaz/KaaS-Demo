@@ -1014,10 +1014,59 @@ Four rules keep it correct, and **new code must not break them**:
   stateless exec agents (`internal/execagent` round-robins `KAAS_SHELL_AGENT_ADDR`) - so no sticky
   routing anywhere. Don't add in-process state that a request on another replica would need.
 
+## Browser demo (the control plane as WebAssembly)
+
+The platform publishes itself as a **static site** on GitHub Pages: the portal plus the whole control
+plane compiled to `js/wasm` and running in the visitor's tab (`cmd/demo-wasm`, `web/portal/src/demo/`,
+`.github/workflows/pages.yml`; operator-facing guide in
+[`docs/deploy/browser-demo.md`](docs/deploy/browser-demo.md)). It is **not a mock**: it is `cmd/api`
+in a different wrapper - the same `internal/app`, the same `api.Routes()`, the same reconcile loop and
+state machine - against the in-memory store and the fakes `make up-fake` already uses. That is the
+whole reason this is cheap: **the seam table above is the feature**. Nothing was stubbed for it.
+
+Five things are load-bearing:
+
+- **`internal/app` is untouched, and must stay that way.** Only four packages cannot compile for
+  `js/wasm`: the three exec-agent proxies (`opts.HTTPHeader` - a browser WebSocket handshake carries
+  no headers) and `internal/shell/pty` (`creack/pty` syscalls). Each got a build-tagged counterpart
+  (`execagent.DialOptions`, `pty_js.go`) rather than a `//go:build js` fork of the 4000-line app
+  wiring, which would have made every future seam a two-place edit. CI builds the wasm target on
+  every PR, because nothing in an ordinary build exercises those files.
+- **The terminals' session logic lives in `internal/api/session.go`, not in their handlers.** A
+  browser has no connection to hijack, so `websocket.Accept` cannot run and the demo drives a
+  `shell.Conn` of its own. Splitting the post-upgrade half out (untagged - the real handlers are the
+  primary caller) is what stops the demo from carrying a parallel copy of the not-Ready gating, the
+  per-user kubeconfig minting and the node-SSH auditing. Authorization deliberately stays in the
+  callers: it happens *before* the upgrade so an unauthorized request gets an HTTP status.
+- **The shim patches three browser APIs and nothing else** (`fetch`, `EventSource`, `WebSocket`).
+  `lib/api.ts` and every page are unchanged and unaware. Two non-obvious consequences: a browser
+  ignores `Set-Cookie` on a JS-constructed `Response`, so **the session cookie is held in the shim**
+  and re-attached as an ordinary header; and Go's wasm scheduler runs a newly spawned goroutine
+  *before* returning to the JS caller, so bridge calls are **deferred by a microtask** - otherwise the
+  first callback fires during `new EventSource(...)`, before the caller has assigned `onopen`. Both
+  were real bugs, not hypotheticals.
+- **A page-hosted module, not a service worker.** A service worker would make the tunnel links
+  ordinary navigations, but it is terminated when idle - which stops the reconcile loop and discards
+  the store. For a demo whose point is a control plane that keeps converging while you watch, that is
+  disqualifying. The cost is the two surfaces that open a tab (the "Open UI" links and the Vault
+  handoff), handled in the shim: the first is served from the module through a blob URL, the second
+  explains itself.
+- **The seed goes through the ordinary app API** (`CreateCluster`, `UpdateUser`, `AddNodeDisk`) and
+  waits for convergence, rather than writing rows. What a visitor lands on is a fleet the platform
+  actually built, with real phases, real events, real quota charged - a fixture would be the one part
+  of the demo that isn't the product. `KAAS_RECONCILE_INTERVAL` exists for it (the tick loop only;
+  River drives the real path).
+
+*Production would* persist the store to IndexedDB so a reload keeps the fleet, and build-tag out the
+Postgres store, govmomi, LDAP and WinRM - about a third of the 46 MB module, and unreachable in this
+build anyway. It ships pre-compressed (~8 MB) because Pages will not negotiate an encoding for
+`application/wasm`.
+
 ## Working in this repo
 
 - Build/test: `make build`, `make test`, `make vet`. Run locally with `make run-api` /
   `make run-worker` (fake providers). Containers: `make up-fake` (no KVM) or `make up` (real).
+  The static browser demo: `make demo-dev` / `make demo-build` (see *Browser demo*).
 - The reconciler advances **one phase per invocation** (`reconcileOne` in `internal/reconcile`);
   phases and the state machine live in `internal/domain`.
 - Ansible uses only `ansible.builtin`, so `ansible-playbook --syntax-check` works without extra
