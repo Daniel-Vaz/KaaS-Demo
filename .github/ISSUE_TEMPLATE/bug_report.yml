@@ -1,0 +1,123 @@
+name: 🐛 Bug report
+description: Something in the platform behaves incorrectly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file this.
+
+        **Security problems do not belong here.** Report them privately through the
+        [security advisory form](https://github.com/Daniel-Vaz/KaaS-Demo/security/advisories/new)
+        - see [SECURITY.md](https://github.com/Daniel-Vaz/KaaS-Demo/blob/main/SECURITY.md).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What went wrong, and what you expected instead.
+      placeholder: |
+        Scaling the `default` pool from 2 to 3 left the cluster in Updating.
+        I expected it to return to Ready with a third worker joined.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: What you did, in order. A reproduction someone else can follow is the single most useful thing in a bug report.
+      placeholder: |
+        1. `make up-fake`
+        2. Create a cluster: small, HA off, default add-ons
+        3. Wait for Ready
+        4. Nodes tab → scale the `default` pool to 3
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: How are you running it
+      options:
+        - Fake mode (make up-fake)
+        - Real mode, Podman Compose (make up)
+        - Scaled real mode (make up-scale)
+        - Helm chart on an existing cluster
+        - Browser demo (GitHub Pages)
+        - Local dev (make run-api / run-worker / web-dev)
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Infrastructure provider
+      description: Which backend the cluster runs on. Pick "None" for fake mode or the browser demo.
+      options:
+        - None (fake / browser demo)
+        - libvirt / KVM (local)
+        - libvirt / KVM (remote KAAS_KVM_HOST)
+        - VMware vSphere
+        - Proxmox VE
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The portal sidebar footer, or `curl localhost:8081/version`. A commit SHA is fine if you are on `main`.
+      placeholder: "0.1.0 (or main @ b929071)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: fake-repro
+    attributes:
+      label: Does fake mode reproduce it?
+      description: If it does, nobody needs your hypervisor to chase it - this is worth a minute to check.
+      options:
+        - "Yes"
+        - "No - it only happens against real infrastructure"
+        - Not applicable
+        - Haven't tried
+    validations:
+      required: true
+
+  - type: input
+    id: phase
+    attributes:
+      label: Cluster phase
+      description: Where the cluster got stuck, if this involves one.
+      placeholder: "Updating (stuck ~30m), was Ready before the scale"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and events
+      description: |
+        The cluster's Activity tab plus `make logs` around the failure. For provisioning failures the
+        OpenTofu or `ansible-playbook` output in the worker log is usually the whole story.
+
+        **Redact first** - logs, kubeconfigs and snapshots from a real deployment carry live credentials.
+      render: shell
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Host OS, WSL2 or not, cluster shape, relevant `.env` settings (with secrets removed), screenshots.
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and this is not a duplicate
+          required: true
+        - label: I removed credentials, kubeconfigs and other secrets from everything I pasted
+          required: true
+        - label: This is not a security vulnerability (those go through the advisory form)
+          required: true

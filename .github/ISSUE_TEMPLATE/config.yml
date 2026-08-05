@@ -1,0 +1,17 @@
+# Issue-form chooser. Blank issues stay enabled on purpose: not everything worth reporting fits a
+# form, and a form that turns people away costs more than a loosely-shaped issue costs to triage.
+blank_issues_enabled: true
+
+contact_links:
+  # Security reports must not become public issues - see SECURITY.md.
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/Daniel-Vaz/KaaS-Demo/security/advisories/new
+    about: Report privately. Please do not open a public issue for a security problem - read SECURITY.md first, since a documented set of lab-scale weaknesses are intentional.
+
+  - name: 📖 Documentation
+    url: https://github.com/Daniel-Vaz/KaaS-Demo/blob/main/docs/README.md
+    about: How the platform works, how to deploy and configure it, and how to use the portal. Worth a look before filing.
+
+  - name: 🚀 Try it in your browser
+    url: https://daniel-vaz.github.io/KaaS-Demo/
+    about: The whole control plane compiled to WebAssembly, running as a static site. Useful for reproducing portal and API behaviour with no backend.
