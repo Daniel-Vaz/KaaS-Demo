@@ -1,0 +1,48 @@
+name: 📖 Documentation
+description: Something in the docs is wrong, missing, or misleading
+labels: [documentation]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Docs are a first-class contribution here. One split is easy to miss and worth knowing:
+
+        - [**`docs/`**](https://github.com/Daniel-Vaz/KaaS-Demo/blob/main/docs/README.md) describes
+          the platform **as it is today, in present tense**, split by audience. It deliberately does
+          *not* carry rationale.
+        - **The code comments** carry the **why** - the load-bearing decisions and the deliberate
+          shortcuts, the latter marked with a "production would…" note.
+
+        So "this page doesn't explain why" is usually working as intended - though if the reasoning
+        is missing from the code too, that is worth reporting.
+
+  - type: input
+    id: page
+    attributes:
+      label: Which page
+      description: A path or a link, plus the section if the page is long.
+      placeholder: docs/deploy/providers/proxmox.md - "Golden images"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong or missing
+      description: What the docs say, what is actually true, or what you needed and could not find.
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested wording
+      description: Optional - if you already know what it should say, put it here and it can go straight into a PR.
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and this is not a duplicate
+          required: true

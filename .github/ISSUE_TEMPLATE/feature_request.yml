@@ -1,0 +1,76 @@
+name: ✨ Feature request
+description: Suggest a capability or an improvement
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two shortcuts worth knowing before you write this up:
+
+        - **Kubernetes versions, OS images, add-ons and release bundles are data**, not code - they
+          live in [`internal/catalog/catalog.json`](https://github.com/Daniel-Vaz/KaaS-Demo/blob/main/internal/catalog/catalog.json).
+          Adding an add-on or a version bundle is an edit to that file.
+        - **New backends plug into an existing seam.** Every external dependency sits behind an
+          interface with a fake and a real implementation.
+          A new hypervisor is a `provision.Provisioner`; a new DNS backend is a `dns.Registrar`.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that the platform makes hard or impossible? Describe the problem before the solution.
+      placeholder: |
+        I run clusters for two teams on the same vSphere network and cannot tell from the portal
+        which addresses are already committed, so I over-allocate the static range.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: What you have in mind
+      description: Your proposed solution, if you have one. "I don't know what the right shape is" is a perfectly good answer.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of the platform
+      options:
+        - Web portal (React SPA)
+        - API (REST / SSE)
+        - Reconcile loop / state machine
+        - Infrastructure provider (libvirt / vSphere / Proxmox)
+        - Catalog (versions, add-ons, bundles)
+        - Ansible (cluster bring-up, upgrades, maintenance)
+        - Add-ons / Helm
+        - Cluster query seams (workloads, storage, networking, monitoring, security, audit)
+        - Secrets / Vault
+        - Deployment (Compose, Helm chart, images)
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have considered
+      description: Including any workaround you are using today.
+
+  - type: checkboxes
+    id: contributing
+    attributes:
+      label: Would you like to implement this?
+      options:
+        - label: I would be willing to open a pull request for this
+          required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and this is not a duplicate
+          required: true
+        - label: I checked the docs to see whether this is already a deliberate design decision
+          required: true
