@@ -23,6 +23,8 @@ Running KubeHarbor for others.
 
 - [**Operator guide**](deploy/README.md) - the overview and the map of deployment paths.
 - [**Fake mode**](deploy/fake-mode.md) - run the whole platform with no hypervisor.
+- [**Browser demo**](deploy/browser-demo.md) - the whole control plane as WebAssembly, published as a
+  static site with no backend at all.
 - [**Podman Compose**](deploy/compose.md) - the container deployment (local, real, and scaled).
 - [**Helm / Kubernetes**](deploy/helm.md) - deploy KubeHarbor onto an existing cluster.
 - [**Configuration reference**](deploy/configuration.md) - every environment variable, by area.

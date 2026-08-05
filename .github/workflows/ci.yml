@@ -58,6 +58,13 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./...
+      # The browser demo (cmd/demo-wasm) compiles the whole control plane for js/wasm, which four
+      # packages cannot do unaided: the three exec-agent proxies (a browser WebSocket handshake takes
+      # no headers) and internal/shell/pty (no OS pseudo-terminal). Each has a build-tagged js
+      # counterpart, and nothing in an ordinary build exercises them - so without this gate the demo
+      # would break silently on any change to those files and only be discovered at publish time.
+      - name: WebAssembly control plane (browser demo)
+        run: GOOS=js GOARCH=wasm go build -o /dev/null ./cmd/demo-wasm
 
   web:
     name: Portal (type-check · build)

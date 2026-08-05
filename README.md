@@ -29,7 +29,12 @@ It runs on **libvirt/KVM**, **VMware vSphere**, or **Proxmox VE**, as **Podman c
 control plane with no hypervisor at all, for demos and development.
 
 >[!TIP]
-> **New to KubeHarbor?** The fastest way to see it is fake mode:
+> **New to KubeHarbor?** [**Try it in your browser**](https://daniel-vaz.github.io/KaaS-Demo/) -
+> the whole control plane compiled to WebAssembly, running as a static site with no backend, seeded
+> with a fleet you can manage (sign in as `admin` / `kubeharbor`). See
+> [Browser demo](docs/deploy/browser-demo.md).
+>
+> To run it locally instead:
 > ```bash
 > make up-fake      # portal at http://localhost:8080 - sign in as admin / admin
 > ```

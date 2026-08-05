@@ -18,6 +18,7 @@ import { IconAlertCircle } from '@tabler/icons-react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { api, ApiError } from '../lib/api';
 import { useAuth } from '../lib/auth';
+import { DEMO_ACCOUNTS, IS_DEMO } from '../demo/accounts';
 import kaasLogo from '../assets/kaas-logo.png';
 
 type Mode = 'login' | 'register';
@@ -85,6 +86,39 @@ export function Login() {
               </Text>
             )}
           </Stack>
+
+          {/* The static demo seeds three accounts to make the tenancy model visible; pick one to
+              fill the form. See web/portal/src/demo/accounts.ts. */}
+          {IS_DEMO && mode === 'login' && (
+            <Alert variant="light" color="blue" p="xs">
+              <Stack gap={6}>
+                <Text size="xs" fw={600}>
+                  Browser demo - pick an account
+                </Text>
+                {DEMO_ACCOUNTS.map((acct) => (
+                  <Anchor
+                    key={acct.username}
+                    component="button"
+                    type="button"
+                    size="xs"
+                    ta="left"
+                    onClick={() => {
+                      setUsername(acct.username);
+                      setPassword(acct.password);
+                    }}
+                  >
+                    <Text span size="xs" fw={600}>
+                      {acct.username}
+                    </Text>
+                    <Text span size="xs" c="dimmed">
+                      {' '}
+                      - {acct.blurb}
+                    </Text>
+                  </Anchor>
+                ))}
+              </Stack>
+            </Alert>
+          )}
 
           <form
             onSubmit={(e) => {

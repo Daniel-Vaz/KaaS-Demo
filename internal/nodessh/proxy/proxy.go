@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"strings"
 
 	"github.com/Daniel-Vaz/KaaS-demo/internal/domain"
@@ -43,10 +42,7 @@ func New(pool *execagent.Pool, token string, log *slog.Logger) *Backend {
 
 // Serve opens one SSH session to node n of cluster c and pipes it to term.
 func (b *Backend) Serve(ctx context.Context, c *domain.Cluster, n *domain.Node, term shell.Conn) error {
-	opts := &websocket.DialOptions{}
-	if b.token != "" {
-		opts.HTTPHeader = http.Header{"Authorization": {"Bearer " + b.token}}
-	}
+	opts := execagent.DialOptions(b.token)
 	candidates := b.pool.Candidates()
 	var wconn *websocket.Conn
 	var err error

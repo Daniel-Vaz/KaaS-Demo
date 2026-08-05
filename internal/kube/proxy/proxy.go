@@ -99,10 +99,7 @@ func (e *Execer) runOne(ctx context.Context, addr string, body []byte) (kubectl.
 }
 
 func (e *Execer) Stream(ctx context.Context, kc []byte, clusterID string, args []string, sink kube.LogSink) error {
-	opts := &websocket.DialOptions{}
-	if e.token != "" {
-		opts.HTTPHeader = http.Header{"Authorization": {"Bearer " + e.token}}
-	}
+	opts := execagent.DialOptions(e.token)
 	// A log stream is read-only and idempotent, so failing over to another agent is free.
 	candidates := e.pool.Candidates()
 	var conn *websocket.Conn

@@ -364,20 +364,24 @@ func New(log *slog.Logger) (*App, error) {
 		"auth", getenv("KAAS_AUTH", AuthLocal))
 
 	rec := &reconcile.Reconciler{
-		Store:           st,
-		Prov:            provs[infraProviders[0]],
-		Provs:           provs,
-		Cfg:             cfgMgr,
-		Addons:          addonMgr,
-		DNS:             dnsRegistrar,
-		Vault:           vaultMgr,
-		Metrics:         metricsCol,
-		Health:          healthChecker,
-		Catalog:         cat,
-		Secrets:         box,
-		Events:          broker,
-		Log:             log,
-		Interval:        500 * time.Millisecond,
+		Store:   st,
+		Prov:    provs[infraProviders[0]],
+		Provs:   provs,
+		Cfg:     cfgMgr,
+		Addons:  addonMgr,
+		DNS:     dnsRegistrar,
+		Vault:   vaultMgr,
+		Metrics: metricsCol,
+		Health:  healthChecker,
+		Catalog: cat,
+		Secrets: box,
+		Events:  broker,
+		Log:     log,
+		// How often the in-memory tick loop looks for work. Only that loop reads it - with Postgres
+		// the queue drives reconciliation instead - so it is a knob for the fake-mode paths: the
+		// tests and the browser demo (cmd/demo-wasm), which seeds a fleet at start-up and wants the
+		// state machine to walk faster than a human-paced 500ms.
+		Interval:        envDuration("KAAS_RECONCILE_INTERVAL", 500*time.Millisecond),
 		CertRenewWindow: certRenewWindow(),
 		EtcdPolicy:      etcdPolicy(log),
 		SnapshotPolicy:  snapshotPolicy(),

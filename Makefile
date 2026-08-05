@@ -2,7 +2,7 @@
         up-scale down-scale logs-scale ps-scale helm-lint helm-template images images-push \
         catalog-check catalog-update version release-check bump chart-package \
         _clusters-down build test vet run-api run-worker golden-image golden-image-vsphere golden-image-proxmox golden-images tidy clean \
-        web-install web-dev web-build kubeconfig
+        web-install web-dev web-build kubeconfig demo-wasm demo-build demo-dev
 
 # ---- Version and build stamping --------------------------------------------------------
 #
@@ -70,6 +70,10 @@ help: ## Show this help
 	@echo "    make web-install Install portal dependencies (npm ci in web/portal)"
 	@echo "    make web-dev     Vite dev server on :5173, proxying /api -> localhost:8080"
 	@echo "    make web-build   Production build of the portal (type-check + vite build)"
+	@echo ""
+	@echo "  Static browser demo (the whole control plane as WebAssembly; see docs/demo.md):"
+	@echo "    make demo-dev    Vite dev server running the in-browser demo (no API needed)"
+	@echo "    make demo-build  Build the complete static site into web/portal/dist"
 	@echo ""
 	@echo "  Kubernetes (Helm chart, deploy/helm/kaas - N replicas of every tier):"
 	@echo "    make images-push REGISTRY=...  Build + push the api/web/worker/shell images"
@@ -277,6 +281,42 @@ web-dev: ## Vite dev server on :5173, proxying /api -> localhost:8080 (run `make
 
 web-build: ## Production build of the portal (type-check + vite build)
 	cd $(WEB_DIR) && npm run build
+
+# ---- Static browser demo (GitHub Pages) ------------------------------------------------
+#
+# The whole control plane compiled to WebAssembly (cmd/demo-wasm) plus a portal build that talks to
+# it in-page instead of over the network - so the product can be published as a static site with no
+# backend, no database and nothing to attack. See docs/demo.md.
+#
+# The module goes into the portal's public/ so Vite copies it verbatim: it must stay a separate
+# file the browser can stream and cache, not something bundled. It is gitignored - it is a build
+# artifact, and a 46 MB one.
+DEMO_DIR  := $(WEB_DIR)/public/demo
+# The public path the site is served from. A GitHub project page lives under /<repo>/, so the
+# workflow passes VITE_BASE=/KaaS-Demo/; a root-hosted copy needs nothing.
+VITE_BASE ?= /
+
+demo-wasm: ## Build the WebAssembly control plane into the portal's public/demo
+	mkdir -p $(DEMO_DIR)
+	cp "$$(go env GOROOT)/lib/wasm/wasm_exec.js" $(DEMO_DIR)/wasm_exec.js
+	GOOS=js GOARCH=wasm go build -ldflags "$(LDFLAGS) -s -w" -o $(DEMO_DIR)/kaas-demo.wasm ./cmd/demo-wasm
+	# Pre-compressed, because Pages will not negotiate an encoding for application/wasm and the
+	# boot code inflates it itself (src/demo/boot.ts). ~46 MB becomes ~8 MB on the wire.
+	gzip -9 -kf $(DEMO_DIR)/kaas-demo.wasm
+	rm -f $(DEMO_DIR)/kaas-demo.wasm
+	@ls -lh $(DEMO_DIR)
+
+demo-build: demo-wasm ## Build the complete static demo site into web/portal/dist
+	cd $(WEB_DIR) && VITE_DEMO=1 VITE_BASE=$(VITE_BASE) npm run build
+	# A single-page app on Pages has no server to rewrite unknown paths, and Pages serves 404.html
+	# for them - so making it the app is what keeps a deep link working on a cold load.
+	cp $(WEB_DIR)/dist/index.html $(WEB_DIR)/dist/404.html
+	# Tells Pages not to run the output through Jekyll, which would drop nothing here today but
+	# silently eats files and directories beginning with an underscore.
+	touch $(WEB_DIR)/dist/.nojekyll
+
+demo-dev: demo-wasm ## Vite dev server serving the demo build (no API needed)
+	cd $(WEB_DIR) && VITE_DEMO=1 npm run dev
 
 # ---- Local dev (no containers) ---------------------------------------------------------
 

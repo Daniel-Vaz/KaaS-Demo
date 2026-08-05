@@ -1,3 +1,5 @@
+//go:build !js
+
 // Package pty runs a real interactive bash+kubectl PTY for a cluster and bridges it to a
 // shell.Conn. It is the worker-side engine behind the exec agent: it runs where the cluster's API
 // server is actually reachable - the host-networked worker (see docs/networking.md) - writing the
