@@ -1,0 +1,15 @@
+## Managed by KubeHarbor (ansible/roles/registry_trust) - do not edit by hand.
+##
+## Direct access to the platform registry itself - how a node pulls the cluster's OWN private images
+## (authenticated by the per-cluster imagePullSecret, which is a Kubernetes concern and not
+## configured here). This entry exists purely so those pulls use the same CA and the same insecure
+## flag as the mirrored ones.
+server = "{{ 'http' if registry_insecure | default(false) else 'https' }}://{{ registry_host }}"
+
+[host."{{ 'http' if registry_insecure | default(false) else 'https' }}://{{ registry_host }}"]
+  capabilities = ["pull", "resolve", "push"]
+{% if registry_insecure | default(false) %}
+  skip_verify = true
+{% elif registry_ca_pem | default('') | length > 0 %}
+  ca = "/etc/containerd/certs.d/kaas-registry-ca.crt"
+{% endif %}

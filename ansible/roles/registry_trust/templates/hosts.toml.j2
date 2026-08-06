@@ -1,0 +1,20 @@
+## Managed by KubeHarbor (ansible/roles/registry_trust) - do not edit by hand.
+##
+## Pull {{ mirror.host }} through the platform registry's proxy-cache project.
+##
+## `server` is the UPSTREAM, not the mirror: containerd tries the [host."..."] entries first and
+## falls back to it, so a registry outage costs pull speed rather than cluster bring-up.
+##
+## `override_path` is required and easy to miss. Harbor's proxy cache lives UNDER a project path
+## (/v2/kaas-cache-<name>), and without this containerd appends the upstream's own path to the mirror
+## URL and every pull 404s.
+server = "{{ mirror.server }}"
+
+[host."{{ mirror.mirror }}"]
+  capabilities = ["pull", "resolve"]
+  override_path = true
+{% if registry_insecure | default(false) %}
+  skip_verify = true
+{% elif registry_ca_pem | default('') | length > 0 %}
+  ca = "/etc/containerd/certs.d/kaas-registry-ca.crt"
+{% endif %}

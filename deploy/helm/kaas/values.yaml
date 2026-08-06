@@ -182,6 +182,89 @@ vault:
   ui:
     enabled: true
 
+# --- Container image registry (internal/registry; the portal's Registry page) --------------------
+# One central registry shared by every cluster, with a private project per cluster, memberships that
+# mirror the portal's own read/write model, and (optionally) pull-through caches of the public
+# registries every cluster pulls from. See docs/deploy/integrations/registry.md.
+registry:
+  # The internal/registry seam selector, KAAS_REGISTRY. `fake` (the default) synthesizes the whole
+  # page with no registry at all; `real` needs `url` and a credential below.
+  seam: fake
+
+  # Deploy the bundled goharbor/harbor dependency. OFF by default, unlike Vault: Harbor brings its
+  # own Postgres, Redis, registry, jobservice, portal and core, and most installs already have a
+  # registry to point at. Enabling it does not by itself set `seam` - the platform still finds the
+  # registry through the settings below.
+  harbor:
+    enabled: false
+
+  # The platform's own route to the registry API. With the bundled Harbor this is its core service.
+  url: ""
+  # THE ADDRESS A CLUSTER NODE USES, and the one that must appear in the certificate's SANs. It is
+  # deliberately separate from `url`: `url` is a Service in the MANAGEMENT cluster, which a tenant
+  # cluster cannot resolve, and this value is baked into every image reference and into every node's
+  # containerd configuration. Empty falls back to `url`'s host, which is right only when both
+  # genuinely share one route. Getting this wrong is the failure that looks like "pulls work from the
+  # control plane and fail on every cluster".
+  host: ""
+  # Browser-facing base for the portal's "Open Harbor" button.
+  uiUrl: ""
+
+  # The credential the WORKER uses: it creates projects, robots and memberships. Production would
+  # source this from a KMS/External Secrets rather than a chart value (the same shortcut as
+  # config.secretKey and vault.rootToken).
+  username: admin
+  password: ""
+  # The credential the API uses, if different. Give the API a READ-ONLY robot: it only lists projects
+  # and artifacts for the Registry page. Left empty it reuses the admin credential above, which is
+  # what makes the portal's "Generate password" button work (only an admin can set another account's
+  # password) and is a documented widening - see the integration guide.
+  apiUsername: ""
+  apiPassword: ""
+
+  # Skip TLS verification, platform-side and on every cluster node. A lab shortcut.
+  insecure: false
+  # PEM of the CA that signed the registry's certificate, handed to every cluster node (installed
+  # into the system trust store and containerd's certs.d by the registry_trust ansible role). Leave
+  # empty when the certificate chains to a public root.
+  caCert: ""
+
+  # Namespaces every project the platform owns, keeping them clear of anything else in a shared
+  # registry.
+  projectPrefix: "kaas-"
+
+  # The pull-through cache: one proxy project per upstream, and every cluster node's containerd
+  # pointed at them. This is most of the value of running a registry at all (it removes the repeated
+  # internet pull of every add-on image on every node of every cluster, and Docker Hub's anonymous
+  # rate limit with it), and it degrades safely - containerd falls back to the upstream when a mirror
+  # does not answer. Turn it off to run the registry as a tenant registry only; the two halves are
+  # independent by construction.
+  mirror: true
+  # Credentials for the Docker Hub proxy. Without them the cache pulls anonymously and the WHOLE
+  # fleet shares one anonymous rate limit.
+  dockerhubUsername: ""
+  dockerhubPassword: ""
+
+  # Keep a deleted cluster's project (and its images) instead of releasing it with the cluster. Off
+  # by default: a project is named after the cluster and cluster names are reusable, so a retained
+  # project can be inherited by the next cluster of that name.
+  retainProject: false
+  # Per-cluster project storage cap in GiB; 0 = unlimited.
+  projectQuotaGB: 0
+
+# Passed through to the goharbor/harbor subchart when registry.harbor.enabled is true. Only the
+# settings the platform depends on are set here; everything else is upstream's default.
+harbor:
+  enabled: false
+  expose:
+    type: clusterIP
+    tls:
+      enabled: false
+  # externalURL must match what clients (and cluster nodes) actually dial - Harbor bakes it into the
+  # tokens it issues. Set it alongside registry.host.
+  externalURL: ""
+  harborAdminPassword: ""
+
 # --- Platform configuration (see docs/running.md) -----------------------------------------------
 config:
   # Master key for at-rest secret encryption (AES-256-GCM) AND the session-cookie signer. It must be

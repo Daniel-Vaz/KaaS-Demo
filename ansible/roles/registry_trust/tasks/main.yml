@@ -1,0 +1,110 @@
+---
+# Point this node's containerd at the platform's image registry: trust its CA, and (when the mirror
+# is on) resolve the public upstreams through the registry's pull-through cache projects.
+#
+# WHEN THIS RUNS IS THE POINT. It is invoked from the `common` role, which runs on every path that
+# brings a node into service - bootstrap, worker join, control-plane join, rejoin and restore - so it
+# lands BEFORE `kubeadm init`, before the CNI, and before any add-on pulls an image. Configuration
+# applied when the cluster reached Ready would arrive after every pull it was meant to accelerate.
+#
+# Vars come from internal/config/ansible.registryVars, injected into every playbook's extra-vars:
+#   registry_host      "harbor.lab:443"  - the image-reference host
+#   registry_ca_pem    PEM               - the CA to trust ("" when it chains to a public root)
+#   registry_insecure  bool              - skip verification (a documented lab shortcut)
+#   registry_mirrors   [{host, server, mirror}]
+#
+# It is a HARD NO-OP when registry_host is unset, so a deployment with no registry is untouched -
+# which is what makes it safe to put on the common path in the first place.
+#
+# There is deliberately NO CREDENTIAL here. The cache projects are public, so nodes pull through them
+# anonymously and no fleet-wide secret ever lands on a tenant's VM; a cluster's own private images
+# come from its per-cluster imagePullSecret instead. See internal/registry.NodeTrust for why.
+#
+# And if the registry is down, nothing here breaks a cluster: each hosts.toml keeps the upstream as
+# its `server`, so containerd falls back to pulling from the internet. The mirror is an accelerator,
+# never a dependency.
+
+- name: Skip when this deployment has no registry
+  ansible.builtin.meta: end_role
+  when: registry_host is not defined or (registry_host | default('') | length == 0)
+
+- name: Ensure the containerd certs.d directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop: >-
+    {{ ['/etc/containerd/certs.d', '/etc/containerd/certs.d/' + registry_host]
+       + (registry_mirrors | default([]) | map(attribute='host')
+          | map('regex_replace', '^', '/etc/containerd/certs.d/') | list) }}
+
+- name: Install the registry CA into the system trust store
+  # System-wide, not only containerd's: crictl, nerdctl and anything else on the box has to agree,
+  # and a node where `crictl pull` works but containerd does not (or the reverse) is a miserable
+  # thing to debug.
+  ansible.builtin.copy:
+    dest: /usr/local/share/ca-certificates/kaas-registry.crt
+    content: "{{ registry_ca_pem }}"
+    mode: '0644'
+  when: registry_ca_pem | default('') | length > 0
+  notify: Update CA trust
+
+- name: Install the registry CA for containerd
+  ansible.builtin.copy:
+    dest: /etc/containerd/certs.d/kaas-registry-ca.crt
+    content: "{{ registry_ca_pem }}"
+    mode: '0644'
+  when: registry_ca_pem | default('') | length > 0
+
+# containerd generates a stock config with `containerd config default` (see the common role), whose
+# registry section carries an EMPTY config_path - so without this every hosts.toml below is ignored,
+# silently. This is also the only supported place for registry configuration in containerd 2.x, which
+# removed the older registry.mirrors / registry.configs blocks from config.toml altogether.
+#
+# The replacement is keyed on the config_path line rather than on the section header on purpose: the
+# section was renamed between containerd 1.x and 2.x, and the key was not.
+- name: Does containerd's config already declare a certs.d path?
+  ansible.builtin.command: grep -qE '^\s*config_path\s*=' /etc/containerd/config.toml
+  register: containerd_has_config_path
+  changed_when: false
+  failed_when: false
+
+- name: Point containerd's CRI plugin at the certs.d directory
+  ansible.builtin.replace:
+    path: /etc/containerd/config.toml
+    regexp: '^(\s*)config_path\s*=.*$'
+    replace: '\1config_path = "/etc/containerd/certs.d"'
+  when: containerd_has_config_path.rc == 0
+  notify: Restart containerd
+
+- name: Declare a certs.d path when the generated config has none
+  ansible.builtin.blockinfile:
+    path: /etc/containerd/config.toml
+    marker: '# {mark} KAAS registry'
+    block: |
+      [plugins."io.containerd.grpc.v1.cri".registry]
+        config_path = "/etc/containerd/certs.d"
+  when: containerd_has_config_path.rc != 0
+  notify: Restart containerd
+
+- name: Configure the pull-through mirrors
+  ansible.builtin.template:
+    src: hosts.toml.j2
+    dest: "/etc/containerd/certs.d/{{ item.host }}/hosts.toml"
+    mode: '0644'
+  loop: "{{ registry_mirrors | default([]) }}"
+  loop_control:
+    label: "{{ item.host }}"
+  vars:
+    mirror: "{{ item }}"
+  notify: Restart containerd
+
+# The registry's own host gets an entry too, so a node pulling the cluster's PRIVATE images uses the
+# same CA and the same insecure flag as everything else. Without it a self-signed registry works for
+# mirrors and fails for the tenant's own images - which is the confusing half-broken state.
+- name: Configure direct access to the registry itself
+  ansible.builtin.template:
+    src: direct.toml.j2
+    dest: "/etc/containerd/certs.d/{{ registry_host }}/hosts.toml"
+    mode: '0644'
+  notify: Restart containerd

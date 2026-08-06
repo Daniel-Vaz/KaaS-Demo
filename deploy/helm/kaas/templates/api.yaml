@@ -130,6 +130,20 @@ spec:
             # The add-on values editor runs `helm show values` API-side (no cluster needed).
             - name: KAAS_ADDON_VALUES
               value: helm
+            {{- if .Values.registry.url }}
+            # The image registry credential the API reads with. It should be a READ-ONLY robot -
+            # the Registry page only lists projects and artifacts. Left unset (registry.apiUsername
+            # empty) it falls back to the admin account, which additionally enables the portal's
+            # self-service password button and is a documented widening of what a compromised api
+            # replica can do. See docs/deploy/integrations/registry.md.
+            - name: KAAS_REGISTRY_USERNAME
+              value: {{ .Values.registry.apiUsername | default .Values.registry.username | quote }}
+            - name: KAAS_REGISTRY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kaas.secretName" . }}
+                  key: {{ if .Values.registry.apiPassword }}registry-api-password{{ else }}registry-password{{ end }}
+            {{- end }}
             # Authentication. Deliberately HERE and not in kaas.commonEnv: the worker never
             # authenticates a user, so the directory config and its bind password stay out of the
             # one container that holds the libvirt socket and every tenant's secrets. Same

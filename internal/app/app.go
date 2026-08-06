@@ -57,6 +57,7 @@ import (
 	"github.com/Daniel-Vaz/KaaS-demo/internal/provision/vsphere"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/quota"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/reconcile"
+	"github.com/Daniel-Vaz/KaaS-demo/internal/registry"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/secrets"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/security"
 	securitykubectl "github.com/Daniel-Vaz/KaaS-demo/internal/security/kubectl"
@@ -127,8 +128,22 @@ type App struct {
 	// "View in Vault" deep-link. The credential-bearing fields are the worker's concern; the API only
 	// needs the browser-facing URL and the mount name.
 	vaultSettings vault.Settings
-	river         *reconcile.River // non-nil when Postgres is configured (durable job queue)
-	kvm           *kvmhost.Host    // where KVM lives; owns the SSH tunnel when it is remote
+	// Registry is the container image registry's READ seam: fake (synthesized) or the real Harbor
+	// client. It backs the Registry page, and on the API it carries only the narrow read-only robot -
+	// the reconciler holds the same object as a Manager, with the admin credential, for provisioning
+	// and access sync. Never nil.
+	Registry registry.Querier
+	// RegistryAdmin is the provisioning half. On the API it is used for exactly one call -
+	// RotateRegistryPassword - and only on a deployment whose API was deliberately given an admin
+	// credential (see registry.Settings.CanSetPasswords); with the ordinary read-only robot the portal
+	// hides the button and the call refuses.
+	RegistryAdmin registry.Manager
+	// registrySettings is the deployment's registry configuration - the API reads the UI URL, the
+	// image-reference host and the project naming from it. The credential-bearing fields are the
+	// worker's concern.
+	registrySettings registry.Settings
+	river            *reconcile.River // non-nil when Postgres is configured (durable job queue)
+	kvm              *kvmhost.Host    // where KVM lives; owns the SSH tunnel when it is remote
 	// InfraProviders is the enabled infrastructure-provider list (KAAS_INFRA_PROVIDERS, ordered;
 	// first = default). vsphere holds that provider's deployment-level network/capacity settings.
 	InfraProviders []string
@@ -253,7 +268,20 @@ func New(log *slog.Logger) (*App, error) {
 		kvm.Stop()
 		return nil, err
 	}
-	cfgMgr, err := buildConfigManager(log, broker, kvm)
+	// The container image registry. Read BEFORE the config manager, which needs the node-trust half
+	// (the CA and the containerd mirror list) so every playbook it runs configures a node to pull
+	// through the registry - see internal/config/ansible/registry.go.
+	registrySettings, err := registryFromEnv()
+	if err != nil {
+		kvm.Stop()
+		return nil, err
+	}
+	nodeTrust, err := registryNodeTrust(registrySettings)
+	if err != nil {
+		kvm.Stop()
+		return nil, err
+	}
+	cfgMgr, err := buildConfigManager(log, broker, kvm, nodeTrust)
 	if err != nil {
 		kvm.Stop()
 		return nil, err
@@ -283,6 +311,13 @@ func New(log *slog.Logger) (*App, error) {
 		return nil, err
 	}
 	vaultMgr, err := buildVaultManager(log, broker, vaultSettings)
+	if err != nil {
+		kvm.Stop()
+		return nil, err
+	}
+	// Both halves of the registry seam come from one constructor; which one a process may actually
+	// use is decided by the credential it was given (see internal/app/registry.go).
+	registryMgr, registryQuerier, err := buildRegistry(log, broker, registrySettings)
 	if err != nil {
 		kvm.Stop()
 		return nil, err
@@ -358,25 +393,28 @@ func New(log *slog.Logger) (*App, error) {
 		"dns", getenv("KAAS_DNS", "fake"),
 		"dns_base_domain", getenv("KAAS_DNS_BASE_DOMAIN", "none"),
 		"vault", getenv("KAAS_VAULT", "fake"),
+		"registry", getenv("KAAS_REGISTRY", "fake"),
+		"registry_mirror", envBool("KAAS_REGISTRY_MIRROR", true),
 		"kvm_host", getenv("KAAS_KVM_HOST", "local"),
 		// The ldap fake/real axis isn't logged here - it only means anything in ldap mode, and
 		// buildAuthenticator already says which directory it built.
 		"auth", getenv("KAAS_AUTH", AuthLocal))
 
 	rec := &reconcile.Reconciler{
-		Store:   st,
-		Prov:    provs[infraProviders[0]],
-		Provs:   provs,
-		Cfg:     cfgMgr,
-		Addons:  addonMgr,
-		DNS:     dnsRegistrar,
-		Vault:   vaultMgr,
-		Metrics: metricsCol,
-		Health:  healthChecker,
-		Catalog: cat,
-		Secrets: box,
-		Events:  broker,
-		Log:     log,
+		Store:    st,
+		Prov:     provs[infraProviders[0]],
+		Provs:    provs,
+		Cfg:      cfgMgr,
+		Addons:   addonMgr,
+		DNS:      dnsRegistrar,
+		Vault:    vaultMgr,
+		Registry: registryMgr,
+		Metrics:  metricsCol,
+		Health:   healthChecker,
+		Catalog:  cat,
+		Secrets:  box,
+		Events:   broker,
+		Log:      log,
 		// How often the in-memory tick loop looks for work. Only that loop reads it - with Postgres
 		// the queue drives reconciliation instead - so it is a knob for the fake-mode paths: the
 		// tests and the browser demo (cmd/demo-wasm), which seeds a fleet at start-up and wants the
@@ -412,6 +450,9 @@ func New(log *slog.Logger) (*App, error) {
 		Values:               valuesProvider,
 		Vault:                vaultMgr,
 		vaultSettings:        vaultSettings,
+		Registry:             registryQuerier,
+		RegistryAdmin:        registryMgr,
+		registrySettings:     registrySettings,
 		InfraProviders:       infraProviders,
 		sharedNet:            sharedNet,
 		dns:                  dnsSettings,
@@ -441,7 +482,29 @@ func New(log *slog.Logger) (*App, error) {
 	if err := app.ensureDirectoryGroups(); err != nil {
 		return nil, fmt.Errorf("seed directory groups: %w", err)
 	}
+	// Point the image registry at the same identity source the portal uses. This runs HERE, and not
+	// with the rest of the registry's provisioning, because writing it needs the directory settings
+	// and those reach the API only - the worker never gets the bind password (see the LDAP notes in
+	// CLAUDE.md), and the worker is where the leader-elected EnsurePlatform runs. Without this the
+	// registry stays on its own default forever and every user is told to fix it by hand.
+	//
+	// Not fatal, and not on the critical path: a registry that will not take its configuration is a
+	// broken sign-in for the registry's own UI, not a reason to refuse to serve the platform. It is
+	// idempotent, so every API replica writing the same thing is fine.
+	app.ensureRegistryAuth()
 	return app, nil
+}
+
+// ensureRegistryAuth is the deliberately-quiet half of registry setup - see the call site.
+func (a *App) ensureRegistryAuth() {
+	if a.RegistryAdmin == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := a.RegistryAdmin.EnsureAuth(ctx); err != nil {
+		a.Log.Error("registry: could not configure the registry's authentication", "err", err)
+	}
 }
 
 // reconcilerDisabled reports whether this process must not reconcile (KAAS_DISABLE_RECONCILER=1).
@@ -3707,7 +3770,7 @@ func imageStager(kvm *kvmhost.Host) tofu.ImageStager {
 
 // buildConfigManager selects the config manager from KAAS_CONFIG (fake|ansible). Ansible is
 // the real path and requires KAAS_SSH_PRIVATE_KEY_FILE.
-func buildConfigManager(log *slog.Logger, sink events.Sink, kvm *kvmhost.Host) (config.Manager, error) {
+func buildConfigManager(log *slog.Logger, sink events.Sink, kvm *kvmhost.Host, nodeTrust registry.NodeTrust) (config.Manager, error) {
 	switch strings.ToLower(getenv("KAAS_CONFIG", "fake")) {
 	case "fake":
 		return config.NewFake(), nil
@@ -3730,6 +3793,9 @@ func buildConfigManager(log *slog.Logger, sink events.Sink, kvm *kvmhost.Host) (
 			// older members during defragmentation. Deployment-level, not per cluster.
 			EtcdQuotaBytes:          etcdQuotaBytes(),
 			EtcdCompactionRetention: getenv("KAAS_ETCD_COMPACTION_RETENTION", "1h"),
+			// Registry trust + pull-through mirrors, injected into every playbook so a node is
+			// configured before its first image pull. Zero when no registry is configured.
+			Registry: nodeTrust,
 		})
 	default:
 		return nil, fmt.Errorf("unknown KAAS_CONFIG %q (want fake|ansible)", os.Getenv("KAAS_CONFIG"))

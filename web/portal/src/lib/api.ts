@@ -52,6 +52,11 @@ import type {
   CustomCatalogView,
   CustomAddon,
   VersionInfo,
+  RegistryOverview,
+  RegistryRepository,
+  RegistryArtifact,
+  RegistryCredential,
+  ClusterRegistry,
 } from './types';
 
 // WorkloadRef identifies a workload for the detail/log/scale endpoints.
@@ -329,6 +334,29 @@ export const api = {
   getSecretManifest: (id: string, ns: string, name: string) => fetchYaml(`${secPath(id, ns, name)}/manifest`),
   // The "View in Vault" handoff: a short-lived, access-scoped Vault token + the UI URL for the path.
   getVaultSession: (id: string) => request<VaultSession>('GET', `/clusters/${id}/vault-session`),
+
+  // ---- image registry (the Registry page) ----
+  // Platform-scoped, not per-cluster: one registry spans every cluster. The project list is already
+  // filtered to what the caller may see, so the page renders it as-is.
+  getRegistry: () => request<RegistryOverview>('GET', '/registry'),
+  listRegistryRepositories: (project: string) =>
+    request<RegistryRepository[] | null>(
+      'GET',
+      `/registry/projects/${encodeURIComponent(project)}/repositories`,
+    ).then((r) => r ?? []),
+  // A repository name nests ("cilium/cilium"), so it is a trailing path rather than one segment -
+  // encoded per segment so the slashes survive but nothing else does.
+  listRegistryArtifacts: (project: string, repo: string) =>
+    request<RegistryArtifact[] | null>(
+      'GET',
+      `/registry/projects/${encodeURIComponent(project)}/artifacts/${repo
+        .split('/')
+        .map(encodeURIComponent)
+        .join('/')}`,
+    ).then((a) => a ?? []),
+  // Generates the CALLER's registry password and returns it once - the platform stores nothing.
+  rotateRegistryPassword: () => request<RegistryCredential>('POST', '/registry/credentials'),
+  getClusterRegistry: (id: string) => request<ClusterRegistry>('GET', `/clusters/${id}/registry`),
 
   // Absolute ws(s):// URL for the per-pod log stream WebSocket (same-origin, like shellUrl).
   workloadLogsUrl: (

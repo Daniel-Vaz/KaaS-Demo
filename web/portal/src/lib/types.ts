@@ -1315,3 +1315,77 @@ export interface AuditQuery {
   resource?: string;
   q?: string;
 }
+
+// ---- image registry (mirrors internal/registry; the Registry page) ----
+// One central registry (Harbor) shared by every cluster, with a private project per cluster. The
+// role on each project is resolved SERVER-SIDE from the platform's own ownership/group model, so the
+// page never has to reason about registry permissions itself - it renders what it is told.
+
+export type RegistryRole = 'projectAdmin' | 'developer' | 'guest';
+export type RegistryProjectKind = 'cluster' | 'cache' | 'library' | 'external';
+
+// RegistryStatus is the registry's own health plus what this deployment offers.
+export interface RegistryStatus {
+  configured: boolean;
+  healthy: boolean;
+  version?: string;
+  host: string;
+  ui_url: string;
+  auth_mode: string;
+  mirror: boolean;
+  upstreams?: string[] | null;
+  can_set_password: boolean;
+  message?: string;
+}
+
+export interface RegistryProject {
+  name: string;
+  kind: RegistryProjectKind;
+  public: boolean;
+  repo_count: number;
+  size_bytes: number;
+  quota_bytes?: number;
+  updated_at?: string;
+  cluster_id?: string;
+  cluster_name?: string;
+  role?: RegistryRole;
+  upstream?: string;
+}
+
+export interface RegistryOverview {
+  status: RegistryStatus;
+  projects: RegistryProject[] | null;
+}
+
+export interface RegistryRepository {
+  name: string;
+  full_name: string;
+  artifact_count: number;
+  pull_count: number;
+  updated_at?: string;
+}
+
+export interface RegistryArtifact {
+  digest: string;
+  tags?: string[] | null;
+  size_bytes: number;
+  pushed_at?: string;
+  type?: string;
+}
+
+// RegistryCredential is the one-time password the portal shows its owner and never stores.
+export interface RegistryCredential {
+  username: string;
+  password: string;
+  host: string;
+}
+
+// ClusterRegistry is one cluster's registry facts, shown on the cluster detail page.
+export interface ClusterRegistry {
+  configured: boolean;
+  wired: boolean;
+  project: string;
+  push_prefix: string;
+  ui_url?: string;
+  can_push: boolean;
+}

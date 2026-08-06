@@ -113,12 +113,21 @@ Administration page, and create a cluster. The API is also on **:8081** for dire
 ### 4. Tear down
 
 ```bash
-make down        # delete running clusters (waits for VMs to go), then stop the containers; keeps the DB
-make nuke        # same, but also removes the Postgres volume
+make down        # delete running clusters (waits for VMs to go), then stop every container and prune volumes
 ```
 
 `make down` deletes clusters *before* stopping the containers, so the worker is never killed
 mid-destroy (which would orphan libvirt domains).
+
+**`make down` is a full cleanup**, `pgdata` included — it ends with `podman volume prune`, so the
+next `make up` starts from an empty database. The prune runs *last*, after every container is gone
+(Harbor's too): a volume is pruneable only while nothing references it, so pruning earlier would
+leave the anonymous volumes Harbor's images declare dangling on the host.
+
+The one thing that survives is Harbor's images, and not by exemption — they live in `harbor.yml`'s
+`data_volume`, a host directory no volume prune can reach, so the pull-through cache is warm again on
+the next `make up`. `make harbor-purge` discards those, and even that leaves `data_volume` itself for
+you to remove by hand: re-pulling a warm cache is hours of bandwidth, so nothing does it implicitly.
 
 ## Scaling out
 

@@ -160,24 +160,6 @@
       }
     },
     {
-      "name": "harbor",
-      "description": "Private container registry with built-in vulnerability scanning, image signing, and role-based access control.",
-      "type": "addon",
-      "version": "1.19.1",
-      "status": "supported",
-      "repo": "https://helm.goharbor.io",
-      "chart": "harbor",
-      "namespace": "harbor-system",
-      "timeout": "10m",
-      "values": {
-        "expose.type": "clusterIP",
-        "expose.tls.enabled": "false",
-        "externalURL": "http://harbor.local",
-        "harborAdminPassword": "Harbor12345",
-        "persistence.enabled": "false"
-      }
-    },
-    {
       "name": "opencost",
       "description": "Real-time cost monitoring and allocation for Kubernetes workloads, broken down by namespace, workload, and label.",
       "type": "addon",

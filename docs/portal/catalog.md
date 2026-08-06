@@ -23,10 +23,14 @@ change.
 ### The add-on library
 
 Beyond the default bundle's add-ons, the catalog carries optional ones you can add to any cluster -
-GitOps (**Argo CD**, **Flux**), policy (**Kyverno**), a registry (**Harbor**), cost
+GitOps (**Argo CD**, **Flux**), policy (**Kyverno**), cost
 (**OpenCost**, **Kepler**), an identity provider (**Keycloak**), alternative storage (**OpenEBS**), and
 more. Add them from a cluster's [Add-ons tab](managing-clusters.md#add-ons), with an optional per-cluster
 values override.
+
+There is no image-registry add-on: the platform runs **one central Harbor** beside the control plane
+and gives every cluster a private project in it, so an in-cluster registry would be a second, worse
+copy of something every cluster already has. See [Registry](registry.md).
 
 ## Custom catalogs
 
