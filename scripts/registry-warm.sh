@@ -45,6 +45,26 @@ done
 RUNTIME="$(command -v podman || command -v docker)" || {
   echo "registry-warm: podman or docker is required" >&2; exit 1; }
 
+# A plain-HTTP registry has to be declared to the runtime, or the pull fails at the PING - before any
+# repository is named - with "http: server gave HTTP response to HTTPS client". That makes every image
+# fail identically, which reads like a broken cache and is not. `make harbor-up` sets Harbor up for
+# HTTP by default (KAAS_REGISTRY_INSECURE=1, see deploy/compose.harbor.yaml), so the common case needs
+# this and the .env sourced above already carries the flag.
+#
+# Only podman can be told per-invocation; docker's insecure-registry list is daemon-level, so there is
+# nothing to pass and the only useful thing to do is say what to add.
+PULL_FLAGS=()
+case "${KAAS_REGISTRY_INSECURE:-}" in
+  1|true|TRUE|yes|YES)
+    if [[ "$(basename "$RUNTIME")" == podman ]]; then
+      PULL_FLAGS+=(--tls-verify=false)
+    else
+      echo "registry-warm: KAAS_REGISTRY_INSECURE is set but docker takes no per-pull flag - add"
+      echo "               {\"insecure-registries\": [\"$HOST\"]} to /etc/docker/daemon.json and restart it."
+    fi
+    ;;
+esac
+
 # upstream_project maps an image's registry host to the cache project the platform created for it.
 # It mirrors registry.DefaultUpstreams - the one place this script duplicates knowledge, and it is
 # four lines rather than a hundred image names.
@@ -121,13 +141,16 @@ while read -r addon; do
     # Pulling THROUGH the cache is what populates it - the point is not to hold the image locally.
     ref="$HOST/$project/$path"
     echo "    warm $ref"
-    if "$RUNTIME" pull --quiet "$ref" >/dev/null 2>&1; then
+    # Keep the runtime's own error and print its last line on failure. Swallowing it and printing a
+    # GUESS is what turned a one-line TLS misconfiguration into twenty-eight identical "the cache may
+    # not proxy this upstream" lines pointing at the wrong component.
+    if err="$("$RUNTIME" pull "${PULL_FLAGS[@]+"${PULL_FLAGS[@]}"}" --quiet "$ref" 2>&1 >/dev/null)"; then
       pulled=$((pulled + 1))
       # Drop the local copy immediately: this host is not where the images are meant to live, and a
       # warm-up that fills the developer's disk with the whole bundle is its own bug.
       "$RUNTIME" rmi "$ref" >/dev/null 2>&1 || true
     else
-      echo "      failed (the cache may not proxy this upstream, or the tag does not exist)"
+      echo "      failed: ${err##*$'\n'}"
       skipped=$((skipped + 1))
     fi
   done < <(images_for "$addon")
