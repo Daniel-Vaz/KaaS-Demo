@@ -3,6 +3,7 @@ import { Badge, useComputedColorScheme } from '@mantine/core';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import { copyText } from '../lib/clipboard';
 
 export type TerminalStatus = 'connecting' | 'open' | 'closed' | 'error';
 
@@ -76,7 +77,7 @@ export function TerminalSession({
       if (e.type === 'keydown' && e.ctrlKey && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
         const selection = term.getSelection();
         if (selection) {
-          void navigator.clipboard?.writeText(selection);
+          void copyText(selection);
           return false;
         }
       }

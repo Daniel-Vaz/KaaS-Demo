@@ -15,6 +15,8 @@ import {
   Alert,
   Button,
   Tooltip,
+  Stack,
+  Code,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
@@ -28,6 +30,7 @@ import {
 } from '@tabler/icons-react';
 import { useClusters, useNamespaces, useConfigMaps, useSecrets } from '../lib/queries';
 import { api, ApiError } from '../lib/api';
+import { copyText } from '../lib/clipboard';
 import { EmptyState } from '../components/EmptyState';
 import { activeClusters, clusterUsable } from '../lib/cluster';
 import { relative } from '../lib/format';
@@ -210,15 +213,27 @@ function VaultButton({ clusterId, wired }: { clusterId: string; wired: boolean }
     setLoading(true);
     try {
       const s = await api.getVaultSession(clusterId);
-      try {
-        await navigator.clipboard.writeText(s.token);
+      if (await copyText(s.token)) {
         notifications.show({
           color: 'violet',
           title: 'Vault token copied',
           message: 'A short-lived token was copied to your clipboard - paste it into the Vault "Token" field to sign in.',
         });
-      } catch {
-        // Clipboard can be unavailable (permissions/non-secure context); still open Vault.
+      } else {
+        // No clipboard at all (an insecure origin whose browser also refuses the legacy path).
+        // Show the token so the handoff still works by hand - it is short-lived and scoped to the
+        // access this user already has, and the alternative is a button that does nothing.
+        notifications.show({
+          color: 'violet',
+          title: 'Copy this Vault token',
+          autoClose: false,
+          message: (
+            <Stack gap={4}>
+              <Text size="sm">Your browser blocked the clipboard. Copy the token and paste it into the Vault &quot;Token&quot; field:</Text>
+              <Code block style={{ wordBreak: 'break-all' }}>{s.token}</Code>
+            </Stack>
+          ),
+        });
       }
       window.open(s.url, '_blank', 'noopener,noreferrer');
     } catch (e) {
