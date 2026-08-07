@@ -301,6 +301,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      # EnsureVaultPlatform (the KV mount, the admin policy, the auth backend) runs ONCE at leader
+      # startup and its failure is logged, not fatal - so a worker that reached a still-sealed Vault
+      # would leave the mount uncreated until its next restart, and every handoff token minted in the
+      # meantime would grant nothing. Dev-mode Vault was up instantly and hid this; a configured one
+      # initialises and unseals first, so wait for it.
+      vault:
+        condition: service_healthy
 
   # The cluster shell/kubectl exec sandbox - the isolated, unprivileged environment a user's Terminal
   # session (and the Workloads/Monitoring/Security kubectl calls) actually runs in. It is

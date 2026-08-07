@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Daniel-Vaz/KaaS-demo/internal/events"
@@ -127,4 +128,58 @@ func TestEmitRoutesClusterScopedToEventsAndPlatformScopedToLog(t *testing.T) {
 func TestPlatformScopedEmitToleratesNilLogger(t *testing.T) {
 	c := &Client{}
 	c.emit("", "warn", "no logger, no sink, no panic")
+}
+
+// mintTestClient serves the two endpoints MintUserToken touches: the ACL policy read it preflights
+// with, and the token create. policyStatus is what the policy read returns; minted records whether
+// the create was reached at all.
+func mintTestClient(t *testing.T, policyStatus int, minted *bool) *Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/v1/sys/policies/acl/"):
+			w.WriteHeader(policyStatus)
+			_, _ = w.Write([]byte(`{"errors":[]}`))
+		case r.URL.Path == "/v1/auth/token/create":
+			*minted = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"auth":{"client_token":"hvs.test"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return &Client{addr: srv.URL, http: srv.Client(), mount: "kaas"}
+}
+
+// Vault ACCEPTS auth/token/create naming a policy it does not have: the token is issued and grants
+// nothing. That turned a worker whose Vault provisioning never landed - or a Vault that lost its
+// state - into a "successful" handoff that failed one UI away, as
+// "preflight capability check returned 403 ... path \"kaas/\"", with nothing pointing back here.
+func TestMintUserTokenRefusesAPolicyVaultDoesNotHave(t *testing.T) {
+	minted := false
+	c := mintTestClient(t, http.StatusNotFound, &minted)
+	if _, err := c.MintUserToken(context.Background(), []string{"kaas-cluster-abc-read"}, nil); err == nil {
+		t.Fatal("expected an error for a policy Vault does not have, got nil")
+	}
+	if minted {
+		t.Fatal("minted a token that would grant nothing")
+	}
+}
+
+// The counterpart, and the one easy to get wrong: reading an ACL policy needs `read` on
+// sys/policies/acl/<name>, which a narrow production minter (a token role restricted to
+// allowed_policies = kaas-*) legitimately lacks - it gets 403 for present and absent policies alike.
+// Treating "not allowed to look" as "not there" would break exactly the deployment shape this package
+// documents as the production one.
+func TestMintUserTokenProceedsWhenItMayNotReadPolicies(t *testing.T) {
+	minted := false
+	c := mintTestClient(t, http.StatusForbidden, &minted)
+	tok, err := c.MintUserToken(context.Background(), []string{"kaas-cluster-abc-read"}, nil)
+	if err != nil {
+		t.Fatalf("a minter that cannot read policies must still mint: %v", err)
+	}
+	if tok != "hvs.test" || !minted {
+		t.Fatalf("expected the token create to be reached, got %q minted=%v", tok, minted)
+	}
 }

@@ -22,6 +22,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -317,7 +318,18 @@ func (c *Client) SyncAccess(ctx context.Context, snap vault.AccessSnapshot) erro
 }
 
 // MintUserToken creates a short-lived child token carrying policies (the UI handoff token).
+//
+// It refuses to mint a token for a policy Vault does not have. Vault ACCEPTS auth/token/create with an
+// unknown policy name - the token is issued, token/lookup-self even lists the name, and it grants
+// nothing - so the platform would report a successful handoff and the user would land in the Vault UI
+// on "preflight capability check returned 403 … path "<mount>/"", with nothing tying that back here.
+// The policies are written by EnsurePlatform (kaas-admin) and EnsureCluster (the per-cluster pair), so
+// their absence means the worker's provisioning never reached this Vault or its state was lost - a
+// deployment fault worth surfacing at the moment it is detectable rather than one UI away.
 func (c *Client) MintUserToken(ctx context.Context, policies []string, meta map[string]string) (string, error) {
+	if err := c.assertPoliciesExist(ctx, policies); err != nil {
+		return "", err
+	}
 	var out struct {
 		Auth struct {
 			ClientToken string `json:"client_token"`
@@ -334,6 +346,47 @@ func (c *Client) MintUserToken(ctx context.Context, policies []string, meta map[
 		return "", err
 	}
 	return out.Auth.ClientToken, nil
+}
+
+// assertPoliciesExist fails when Vault definitively does not have one of the policies.
+//
+// The distinction that matters is 404 vs 403, and only 404 is evidence: reading an ACL policy needs
+// `read` on sys/policies/acl/<name>, which the broad management token has and a narrow production
+// minter (a token role restricted to allowed_policies = kaas-*) legitimately does not. A minter that
+// cannot look gets 403 for present and absent policies alike, so treating that as absence would break
+// exactly the deployment this package documents as the production shape. Not being allowed to check is
+// not a reason to refuse - only a definite 404 is.
+func (c *Client) assertPoliciesExist(ctx context.Context, policies []string) error {
+	for _, p := range policies {
+		code, err := c.probe(ctx, "/v1/sys/policies/acl/"+url.PathEscape(p))
+		if err != nil {
+			return err // a transport failure is a real failure; the caller retries
+		}
+		if code == http.StatusNotFound {
+			return fmt.Errorf("hcvault: Vault at %s has no policy %q, so a token carrying it would grant "+
+				"nothing - the worker's Vault provisioning has not reached this Vault (check that the "+
+				"worker runs KAAS_VAULT=real against the same address, and that Vault has not lost its "+
+				"state; a cluster's policies are rewritten by clearing its vault_wired marker)", c.addr, p)
+		}
+	}
+	return nil
+}
+
+// probe issues a GET and reports the status code, for the cases where the code IS the answer and a
+// non-2xx is not on its own an error. A transport failure is still an error.
+func (c *Client) probe(ctx context.Context, path string) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.addr+path, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("X-Vault-Token", c.token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("hcvault: GET %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, nil
 }
 
 // --- small helpers ------------------------------------------------------------------------------

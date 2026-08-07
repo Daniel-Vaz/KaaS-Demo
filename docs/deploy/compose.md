@@ -63,7 +63,8 @@ make up-scale    # compose.yaml + compose.real.yaml + compose.scale.yaml - the s
   stripped of the worker's secrets. They hold different things and are contained differently: the
   shell sandbox holds *no* credentials (a bash escape finds nothing), the nodessh sandbox holds the VM
   key but *no shell* (there's no session to read it from).
-- **`vault`** is a dev-mode HashiCorp Vault (see [Vault](integrations/vault.md)).
+- **`vault`** is a single-node HashiCorp Vault on file storage in the `vaultdata` volume, initialised
+  and unsealed by its own entrypoint (see [Vault](integrations/vault.md)).
 - **`postgres`** is the single source of truth. It's published on `:5432` so the host-networked worker
   can reach it.
 

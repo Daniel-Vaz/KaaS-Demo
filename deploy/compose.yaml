@@ -170,18 +170,39 @@ services:
         condition: service_healthy
     networks: [kaas]
 
-  # HashiCorp Vault - the platform's secret store (internal/vault). Dev mode: auto-unsealed, a fixed
-  # root token, in-memory storage. A DELIBERATE demo shortcut (production would run HA Vault with
-  # auto-unseal via a KMS, persistent storage and an audit device). The platform creates its own `kaas`
-  # KV mount and per-cluster paths/policies on top; it never touches Vault's dev `secret/` mount. On the
-  # kaas network as `vault:8200`; the UI is published on the host by compose.ports.yaml.
+  # HashiCorp Vault - the platform's secret store (internal/vault). A single unseal share and a fixed
+  # platform token, on FILE storage in the `vaultdata` volume (deploy/vault/vault.hcl + entrypoint.sh,
+  # which initialise on first boot and unseal on every boot so `make up` stays one command). Still a
+  # DELIBERATE demo shortcut - production would run HA Vault with auto-unseal via a KMS, TLS and an
+  # audit device - but no longer an EPHEMERAL one.
+  #
+  # It used to run `server -dev`, whose storage is in-memory. That made every restart of this container
+  # silently destroy the `kaas` mount and every policy the platform had written, while Postgres went on
+  # believing the work was done: Cluster.VaultWired latches and nothing clears it, so reconcileVaultWiring
+  # never re-ran EnsureCluster, and EnsurePlatform only runs at leader startup. The user-visible symptom
+  # was a "View in Vault" handoff whose token Vault accepted and which granted nothing.
+  #
+  # The platform creates its own `kaas` KV mount and per-cluster paths/policies on top. On the kaas
+  # network as `vault:8200`; the UI is published on the host by compose.ports.yaml.
   vault:
     image: docker.io/hashicorp/vault:2.0
-    command: server -dev -dev-listen-address=0.0.0.0:8200
+    entrypoint: /usr/local/bin/kaas-vault-entrypoint.sh
     environment:
-      - VAULT_DEV_ROOT_TOKEN_ID=${KAAS_VAULT_TOKEN:-kaas-root-dev}
-    cap_add:
-      - IPC_LOCK
+      # The entrypoint mints a token with this exact ID after init, so the platform's configuration is
+      # a fixed value rather than a secret an operator has to copy out of a generated init file.
+      - KAAS_VAULT_TOKEN=${KAAS_VAULT_TOKEN:-kaas-root-dev}
+    volumes:
+      - ./vault/vault.hcl:/vault/config/vault.hcl:ro
+      - ./vault/entrypoint.sh:/usr/local/bin/kaas-vault-entrypoint.sh:ro
+      - vaultdata:/vault/file
+    # Unlike dev mode, a configured Vault is briefly sealed while it initialises - and EnsurePlatform is
+    # logged-not-fatal and runs once at leader startup, so a worker that raced it would leave the mount
+    # uncreated until its next restart. Gate the dependents on an unsealed, initialised Vault instead.
+    healthcheck:
+      test: ["CMD-SHELL", "vault status -address=http://127.0.0.1:8200 >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
     networks: [kaas]
 
   postgres:
@@ -206,3 +227,7 @@ networks:
 
 volumes:
   pgdata:
+  # Vault's file storage, plus the init.json holding its unseal key and initial root token. Removing
+  # this volume is what destroys the platform's Vault state - and, because Cluster.VaultWired latches,
+  # every affected cluster then needs that marker cleared to be re-provisioned.
+  vaultdata:

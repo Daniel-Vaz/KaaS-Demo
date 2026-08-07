@@ -552,10 +552,21 @@ Load-bearing:
 - **The platform only ever writes under its own `kaas` mount** and manages its own policies/identity,
   so it coexists with a Vault already used for other things.
 
-*Production would* run HA Vault with auto-unseal via a KMS, persistent storage and an audit device; the
-compose `vault` service is a **dev-mode** Vault (auto-unsealed, a fixed root token, in-memory storage)
-- a deliberate lab shortcut. The Fake records state in memory and logs, so admission, wiring, the
-Secrets page, and the handoff are all demoable under `make up-fake` with no Vault at all.
+*Production would* run HA Vault with auto-unseal via a KMS, TLS and an audit device; the compose
+`vault` service is a single-share, single-node Vault on **file** storage (`deploy/vault/`, whose
+entrypoint initialises on first boot and unseals on every boot, then mints a token with the fixed
+`KAAS_VAULT_TOKEN` id so the platform's config is a constant) - a deliberate lab shortcut, but a
+**durable** one. It used to be `server -dev`, which is where a load-bearing invariant came from:
+**Vault's state must outlive its container, because `VaultWired` latches.** Dev mode's storage is
+in-memory, so a restart destroyed the mount and every policy while Postgres went on believing the work
+was done - nothing clears the marker, so `reconcileVaultWiring` never re-ran `EnsureCluster`, and
+`EnsurePlatform` is logged-not-fatal and runs only at leader startup. The single visible symptom was a
+"View in Vault" token Vault **accepted** and which granted nothing (Vault issues a token naming a
+policy it does not have). `MintUserToken` now refuses that rather than minting it, and the worker
+gates on Vault being unsealed - but the marker's latch is the thing to remember: a Vault that loses
+its state needs `vault_wired` cleared per cluster, not just a restart. The Fake records state in
+memory and logs, so admission, wiring, the Secrets page, and the handoff are all demoable under
+`make up-fake` with no Vault at all.
 
 ## Image registry (Harbor + pull-through caches)
 
@@ -1303,8 +1314,8 @@ model, kept converged with Postgres, consumed in-cluster by the bundled external
 surfaced on the Secrets page - see *Secret store*). Deliberately
 stubbed, and marked in code with a "production would…" note: secret key management (env-derived AES
 key for the platform's own at-rest encryption, not a KMS; the LDAP bind password likewise comes from
-the env; and the central Vault runs in dev mode - auto-unsealed under a fixed root token, in-memory
-storage - rather than HA Vault with KMS auto-unseal and an audit device); authn (local accounts
+the env; and the central Vault runs single-node on file storage under a one-share unseal key kept
+beside its data - rather than HA Vault with KMS auto-unseal and an audit device); authn (local accounts
 with bcrypt + signed-cookie sessions - no IdP/OIDC, no server-side revocation, env-derived signing
 key) and coarse authz (an owner-or-admin split plus a group read/write role, not fine-grained
 per-resource RBAC); **directory deprovisioning** - sessions are stateless and `ResolveSession` never

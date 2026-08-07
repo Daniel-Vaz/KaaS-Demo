@@ -175,6 +175,20 @@ vault:
   uiUrl: ""
   # Passed through to the hashicorp/vault subchart: a single-server DEV instance (auto-unsealed,
   # in-memory). Production would run server.ha with auto-unseal + persistent storage + an audit device.
+  #
+  # WARNING - dev mode's storage is IN-MEMORY, so every restart of this pod destroys the `kaas` mount
+  # and every policy the platform wrote, while Postgres goes on believing the work was done:
+  # Cluster.VaultWired latches and nothing clears it, and EnsurePlatform only runs at leader startup.
+  # The symptom is a "View in Vault" handoff whose token Vault accepts and which grants nothing (the
+  # API now refuses to mint it instead - see hcvault.MintUserToken). Recovery is to restart the worker
+  # and clear the marker: `update clusters set vault_wired=false where phase='ready';`.
+  #
+  # The compose deployment fixed this with a file backend and an init/unseal entrypoint
+  # (deploy/vault/). The equivalent here is server.standalone + server.dataStorage, which is NOT set by
+  # default because the subchart does not unseal itself: a persistent standalone Vault needs
+  # `vault operator init`/`unseal` by hand on first install and after every pod restart, unless you
+  # configure a KMS auto-unseal seal stanza. That is an operator decision, so it is documented rather
+  # than switched on under you.
   server:
     dev:
       enabled: true

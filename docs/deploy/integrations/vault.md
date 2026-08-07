@@ -22,8 +22,15 @@ kaas/clusters/<cluster-id>/<ns>/<n>     per-cluster, per-namespace tenant secret
 
 ## Configuration
 
-The Compose stack ships a **dev-mode Vault container** (auto-unsealed, a fixed root token, in-memory
-storage) so the whole flow works out of the box - a deliberate lab shortcut. The relevant settings:
+The Compose stack ships a **single-node Vault container** on file storage (the `vaultdata` volume),
+configured by `deploy/vault/vault.hcl` and started by `deploy/vault/entrypoint.sh`, which initialises
+it with one unseal share on first boot, unseals it on every boot, and mints a token whose id is the
+fixed `KAAS_VAULT_TOKEN` - so the whole flow works out of the box with no manual unseal step. The
+unseal key and initial root token are written to `init.json` inside that volume: a deliberate lab
+shortcut (production would use KMS auto-unseal and never materialise an unseal key), but the state is
+durable across restarts, which matters - see [Recovering lost Vault state](#recovering-lost-vault-state).
+
+The relevant settings:
 
 ```bash
 KAAS_VAULT=real                              # fake = in-memory (default in fake mode)
@@ -68,9 +75,37 @@ The Vault auth backend the platform configures follows `KAAS_AUTH`:
 The fake records state in memory and logs, so admission, wiring, the Secrets page, and the handoff are
 all demoable under `make up-fake` with no Vault at all.
 
+## Recovering lost Vault state
+
+Vault's state must outlive its container, because `VaultWired` **latches**: once a cluster is wired,
+nothing clears the marker, so the reconcile loop never re-provisions its path. `EnsurePlatform` (the
+mount, the admin policy, the auth backend) is likewise logged-not-fatal and runs only at leader
+startup. So if Vault loses its data - the `vaultdata` volume removed, an external Vault rebuilt, or a
+Helm deployment left on the subchart's in-memory dev mode - restarting things is not enough.
+
+The symptom is the **Secrets page's "View in Vault" button**: Vault will happily issue a token naming a
+policy it does not have, and the Vault UI then rejects it with
+
+```
+preflight capability check returned 403, please ensure client's policies grant access to path "kaas/"
+```
+
+The API now refuses to mint such a token and returns that reason instead, so the failure surfaces in
+the portal rather than one UI away. To recover:
+
+```bash
+podman restart kaas-worker    # re-runs EnsurePlatform: the mount, kaas-admin, the auth backend
+psql "$DATABASE_URL" -c "update clusters set vault_wired=false where phase='ready';"
+```
+
+Clearing the marker makes the next reconcile tick re-run `EnsureCluster` per cluster, rewriting its
+policies, KV subtree and ESO auth role. It is idempotent and touches no secret **data** - only
+`releaseVault`, on delete, ever removes that. Secrets written to a Vault whose storage was lost are
+gone with it; this restores the paths and access, not their contents.
+
 ## Deploying real Vault
 
-The Compose dev Vault is not production-grade. For a real deployment, run HA Vault with auto-unseal via
+The Compose Vault is not production-grade. For a real deployment, run HA Vault with auto-unseal via
 a KMS, persistent storage, and an audit device, and point `KAAS_VAULT_ADDR` / `KAAS_VAULT_TOKEN` at it.
 The platform only ever writes under its own `kaas` mount and manages its own policies/identity, so it
 coexists with an existing Vault.
