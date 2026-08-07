@@ -17,6 +17,19 @@
 #
 # Provider vars are hardcoded fake here on purpose - the API must not pick up KAAS_PROVISIONER
 # etc. from a .env meant for the worker (see deploy/compose.real.yaml).
+#
+# EVERY service carries `restart: unless-stopped`, here and in the overlays. This is a control plane:
+# it is meant to be left running on a host nobody is logged into, and a stack that survives only as
+# long as someone's terminal is not one. `unless-stopped` rather than `always` so `make down` (and a
+# hand `podman stop`) stays honoured across a reboot - a deliberate stop should not be undone by one.
+# Two things it does NOT do on its own, both host-level and both needed on a real deployment:
+#
+#   loginctl enable-linger $USER               # else logout tears down the whole rootless user
+#                                              #   manager, containers and all, policy or no policy
+#   systemctl --user enable --now podman-restart.service   # what re-applies the policy at boot
+#
+# See docs/deploy/README.md. Note the worker matters most here: it holds the reconcile loop, so while
+# it is down nothing converges - no phase advances, no node is repaired, no etcd snapshot is taken.
 name: kaas-demo
 
 services:
@@ -37,6 +50,7 @@ services:
         - VERSION=${KAAS_BUILD_VERSION:-dev}
         - COMMIT=${KAAS_BUILD_COMMIT:-unknown}
         - DATE=${KAAS_BUILD_DATE:-unknown}
+    restart: unless-stopped
     depends_on:
       - api
     networks: [kaas]
@@ -151,6 +165,7 @@ services:
       - KAAS_LDAP_MAX_FAILURES=${KAAS_LDAP_MAX_FAILURES:-3}
       - KAAS_LDAP_MAX_IP_FAILURES=${KAAS_LDAP_MAX_IP_FAILURES:-30}
       - KAAS_LDAP_THROTTLE_WINDOW=${KAAS_LDAP_THROTTLE_WINDOW:-5m}
+    restart: unless-stopped
     volumes:
       - ../migrations:/migrations:ro
       # The mapping config. Defaults to the tracked example so compose always starts (KAAS_AUTH=local
@@ -195,6 +210,10 @@ services:
       - ./vault/vault.hcl:/vault/config/vault.hcl:ro
       - ./vault/entrypoint.sh:/usr/local/bin/kaas-vault-entrypoint.sh:ro
       - vaultdata:/vault/file
+    # Restarting is safe now that storage is on `vaultdata` - it was not under `server -dev`, which is
+    # the bug the comment above describes. The entrypoint unseals on every boot, so a policy-driven
+    # restart brings Vault back usable rather than sealed and waiting for an operator.
+    restart: unless-stopped
     # Unlike dev mode, a configured Vault is briefly sealed while it initialises - and EnsurePlatform is
     # logged-not-fatal and runs once at leader startup, so a worker that raced it would leave the mount
     # uncreated until its next restart. Gate the dependents on an unsealed, initialised Vault instead.
@@ -215,6 +234,7 @@ services:
       # 18+'s image stores data in a major-version-specific subdirectory it creates itself under
       # this mount, so it must be the parent dir - not /var/lib/postgresql/data as with <=17.
       - pgdata:/var/lib/postgresql
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U kaas"]
       interval: 3s

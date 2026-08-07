@@ -49,6 +49,7 @@ services:
         - VERSION=${KAAS_BUILD_VERSION:-dev}
         - COMMIT=${KAAS_BUILD_COMMIT:-unknown}
         - DATE=${KAAS_BUILD_DATE:-unknown}
+    restart: unless-stopped
     ports:
       - "8080:80"   # the portal (→ web replicas)
       - "8081:81"   # the raw JSON+SSE API (→ api replicas)
@@ -91,6 +92,9 @@ services:
         - COMMIT=${KAAS_BUILD_COMMIT:-unknown}
         - DATE=${KAAS_BUILD_DATE:-unknown}
     network_mode: host
+    # Its own key, unlike web/api/worker above - those merge with the base services and inherit the
+    # policy; shell2/nodessh2 are whole service definitions with nothing to inherit from.
+    restart: unless-stopped
     environment:
       - KAAS_SHELL_LISTEN=:8083
       - KAAS_WORK_DIR=/work
@@ -122,6 +126,7 @@ services:
         - COMMIT=${KAAS_BUILD_COMMIT:-unknown}
         - DATE=${KAAS_BUILD_DATE:-unknown}
     network_mode: host
+    restart: unless-stopped
     environment:
       - KAAS_NODE_SSH_LISTEN=:8085
       - KAAS_WORK_DIR=/work

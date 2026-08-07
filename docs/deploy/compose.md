@@ -111,6 +111,30 @@ make ps
 Open **http://localhost:8080**, sign in as `admin` / `admin`, grant your account quota on the
 Administration page, and create a cluster. The API is also on **:8081** for direct curl.
 
+### 3b. Leaving it running (a remote host)
+
+Every service carries `restart: unless-stopped`, so a crashed container comes back and `make down`
+still means down. Two host-level settings finish the job, and on a machine you administer over SSH the
+first one is not optional:
+
+```bash
+loginctl enable-linger $USER                            # survive logout
+systemctl --user enable --now podman-restart.service    # survive reboot
+```
+
+Without linger, systemd tears down your whole rootless user manager when your last session ends —
+every container with it, restart policy or no restart policy. That is why closing an SSH session takes
+the stack down. Confirm with `loginctl show-user $USER --property=Linger`.
+
+`podman-restart.service` is what re-applies the restart policies at boot; without it the policies only
+cover crashes, not a reboot. Harbor, when configured, runs as its own compose project from its own
+generated file and carries its own policy — the same two host settings cover it.
+
+The container to care about is the **worker**: it holds the reconcile loop, and while it is down the
+portal keeps serving as if nothing were wrong while no phase advances, no node is repaired and no etcd
+snapshot is taken. Restarting it is safe — every reconcile step is idempotent and River redelivers the
+in-flight job.
+
 ### 4. Tear down
 
 ```bash

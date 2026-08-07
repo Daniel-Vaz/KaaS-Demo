@@ -63,6 +63,11 @@ KubeHarbor works out of the box, and layers in these when you configure them:
   rebuild and recreate freely (`make rebuild`) without disturbing running clusters. They outlive
   container *recreation*, not `make down`, which is a full cleanup and prunes them - it deletes every
   cluster first, so there is no state left to keep.
+- **On a remote host, enable linger.** Every compose service sets `restart: unless-stopped`, but a
+  rootless Podman stack is still torn down when your last login session ends — so
+  `loginctl enable-linger $USER` (survive logout) plus
+  `systemctl --user enable --now podman-restart.service` (survive reboot). See
+  [Compose](compose.md#3b-leaving-it-running-a-remote-host).
 - **Never change `KAAS_SECRET_KEY` across an upgrade.** It derives the key that encrypts every stored
   kubeconfig and signs every session - rotate it and the stored secrets no longer decrypt. Keep it
   stable in `.env`.

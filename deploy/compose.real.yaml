@@ -64,6 +64,11 @@ services:
     # The only container on the host network - so it can SSH to VMs on virbr0
     # (192.168.122.0/24) and reach the published Postgres at localhost:5432.
     network_mode: host
+    # The one whose absence is silent: the API keeps serving and the portal keeps rendering, while
+    # nothing converges behind it (see the note at the top of compose.yaml). Restarting is safe by
+    # construction - every reconcile step is idempotent and River redelivers whatever job was in
+    # flight, which is the same contract that makes a crashed worker recoverable at all.
+    restart: unless-stopped
     environment:
       - DATABASE_URL=postgres://kaas:kaas@localhost:5432/kaas?sslmode=disable
       - KAAS_MIGRATIONS_DIR=/migrations
@@ -338,6 +343,11 @@ services:
         - COMMIT=${KAAS_BUILD_COMMIT:-unknown}
         - DATE=${KAAS_BUILD_DATE:-unknown}
     network_mode: host
+    # Sessions do not survive a restart (each is a live PTY over a WebSocket), but the agent coming
+    # back on its own is what makes the Terminal/Workloads/Monitoring/Security/Audit/tunnel seams work
+    # again without an operator - the API round-robins and fails over, so a restarting agent degrades
+    # rather than breaks.
+    restart: unless-stopped
     environment:
       - KAAS_SHELL_LISTEN=:8082
       - KAAS_WORK_DIR=/work
@@ -395,6 +405,7 @@ services:
         - COMMIT=${KAAS_BUILD_COMMIT:-unknown}
         - DATE=${KAAS_BUILD_DATE:-unknown}
     network_mode: host
+    restart: unless-stopped
     environment:
       - KAAS_NODE_SSH_LISTEN=:8084
       - KAAS_WORK_DIR=/work
