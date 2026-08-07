@@ -215,7 +215,20 @@ curl -s http://localhost:8080/api/version
 # {"version":"1.4.0","commit":"a1b2c3d...","date":"2026-08-04T10:00:00Z"}
 ```
 
-`"dev"` means an unstamped build - `go run`, `make run-api`, or an image built without the build args.
+This holds for a Compose deployment too, not only for published images: `make up` / `up-fake` /
+`up-scale` / `rebuild` stamp the images they build from the working tree, so a Compose host names
+itself the same way a Helm one does. Two details are specific to building from a tree rather than a
+tag - the timestamp is the **commit's** date (a wall-clock one would recompile every Go binary on
+each `make up`, since the build args feed the layer cache), and a **dirty worktree is reported as
+such**:
+
+```bash
+curl -s http://localhost:8080/api/version
+# {"version":"1.4.0+dirty","commit":"a1b2c3d...","date":"2026-08-04T10:00:00Z"}
+```
+
+`"dev"` means an unstamped build - `go run`, `make run-api`, or an image built without the build
+args (a `podman compose --build` run by hand, outside `make`).
 
 ### Rolling back
 

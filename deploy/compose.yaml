@@ -27,6 +27,16 @@ services:
     build:
       context: ..
       dockerfile: deploy/Containerfile.web
+      # Build identity, exported by the Makefile (see its "Version and build stamping" block). A
+      # Compose deployment is a real deployment, so its images carry the same stamp a published one
+      # does - the alternative is a platform that calls itself `dev` on GET /version and in the
+      # portal's footer. The defaults are what a bare `podman compose --build`, run outside make,
+      # honestly gets. Every image with a build stanza repeats this; the Containerfiles declare the
+      # matching ARGs.
+      args:
+        - VERSION=${KAAS_BUILD_VERSION:-dev}
+        - COMMIT=${KAAS_BUILD_COMMIT:-unknown}
+        - DATE=${KAAS_BUILD_DATE:-unknown}
     depends_on:
       - api
     networks: [kaas]
@@ -35,6 +45,11 @@ services:
     build:
       context: ..
       dockerfile: deploy/Containerfile.api
+      # See `web` above. This is the one that matters most: the API is what SERVES GET /version.
+      args:
+        - VERSION=${KAAS_BUILD_VERSION:-dev}
+        - COMMIT=${KAAS_BUILD_COMMIT:-unknown}
+        - DATE=${KAAS_BUILD_DATE:-unknown}
     environment:
       - KAAS_ADDR=:8080
       - KAAS_SECRET_KEY=${KAAS_SECRET_KEY:-dev-only-change-me}

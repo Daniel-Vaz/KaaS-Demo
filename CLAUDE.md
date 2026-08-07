@@ -1238,7 +1238,14 @@ Makefile and the Containerfile `ARG`s, surfaced on the public `GET /version` (pu
 reason `/healthz` is, and carrying version/commit/date only - which release is running is not a
 secret, the machine that built it is), logged at start-up by both binaries, and shown in the portal's
 sidebar footer. The portal READS it from the API rather than baking in its own `package.json`
-version, because web and api are separate images that legitimately differ mid-upgrade. Published
+version, because web and api are separate images that legitimately differ mid-upgrade. **The Compose
+path stamps too** - `deploy/compose*.yaml` carry the same three `build.args`, interpolated from the
+Makefile's exported `KAAS_BUILD_*`: `make up` is a real deployment model, and an image built by
+`podman compose --build` reporting `dev` makes "what is this host running?" unanswerable exactly
+where it is asked most. Building from a working tree rather than a tag changes two things: `DATE` is
+the **commit's** date, not "now" (the build args feed the `go build` layer's cache key, so a
+wall-clock stamp would recompile all four Go binaries on every `make up`), and a dirty tree is
+labelled `X.Y.Z+dirty`, since the commit no longer describes what is running. Published
 digests carry a keyless `attest-build-provenance` attestation. Images are `linux/amd64` only - the
 worker bakes OpenTofu with three provider plugins plus Ansible/Helm/kubectl, and cross-building that
 under QEMU would dominate the pipeline for a platform nobody runs; adding arm64 is one line in

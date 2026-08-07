@@ -43,6 +43,12 @@ services:
     build:
       context: ..
       dockerfile: deploy/Containerfile.lb
+      # Build identity - see the note on `web` in compose.yaml. Labels only here (no Go binary),
+      # but a container nobody can date is a container nobody can correlate with an incident.
+      args:
+        - VERSION=${KAAS_BUILD_VERSION:-dev}
+        - COMMIT=${KAAS_BUILD_COMMIT:-unknown}
+        - DATE=${KAAS_BUILD_DATE:-unknown}
     ports:
       - "8080:80"   # the portal (→ web replicas)
       - "8081:81"   # the raw JSON+SSE API (→ api replicas)
@@ -78,6 +84,12 @@ services:
     build:
       context: ..
       dockerfile: deploy/Containerfile.shell
+      # Build identity - see the note on `web` in compose.yaml. Identical to `shell`'s, which is the
+      # point: two agents of the same tier at different versions is exactly the skew to avoid.
+      args:
+        - VERSION=${KAAS_BUILD_VERSION:-dev}
+        - COMMIT=${KAAS_BUILD_COMMIT:-unknown}
+        - DATE=${KAAS_BUILD_DATE:-unknown}
     network_mode: host
     environment:
       - KAAS_SHELL_LISTEN=:8083
@@ -104,6 +116,11 @@ services:
     build:
       context: ..
       dockerfile: deploy/Containerfile.nodessh
+      # Build identity - see the note on `web` in compose.yaml, and on `shell2` above.
+      args:
+        - VERSION=${KAAS_BUILD_VERSION:-dev}
+        - COMMIT=${KAAS_BUILD_COMMIT:-unknown}
+        - DATE=${KAAS_BUILD_DATE:-unknown}
     network_mode: host
     environment:
       - KAAS_NODE_SSH_LISTEN=:8085

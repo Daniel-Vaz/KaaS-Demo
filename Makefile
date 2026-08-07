@@ -21,6 +21,30 @@ LDFLAGS      := -X $(MODULE)/internal/version.Version=$(VERSION) \
                 -X $(MODULE)/internal/version.Commit=$(COMMIT) \
                 -X $(MODULE)/internal/version.Date=$(DATE)
 
+# The SAME stamp, for the Compose path. `make up` is a real deployment model, not only a dev loop,
+# so an image built by `podman compose --build` has to name itself exactly like one built by
+# `make images` - otherwise every Compose deployment reports `dev` on GET /version and in the
+# portal footer, and "what is this host running?" has no answer where it is asked most often.
+# Compose passes no build args of its own: these are interpolated into the `build.args` blocks of
+# deploy/compose*.yaml, hence the `export`. They are KAAS_BUILD_*-prefixed rather than plain
+# VERSION/COMMIT/DATE so a stray value in the operator's shell or .env - both of which Compose
+# reads - cannot silently relabel the platform.
+#
+# Two deliberate differences from IMAGE_ARGS, both because this stamp is applied to a WORKING TREE
+# rather than to a tag:
+#
+#   - DATE is the COMMIT's date, not "now". The build args feed the `go build` layer's cache key, so
+#     a wall-clock timestamp would recompile all four Go binaries on every single `make up`, even
+#     with nothing changed. Pinned to the commit, the whole stamp is a pure function of the tree and
+#     the cache holds until the tree actually moves.
+#   - A dirty worktree says so in the version (`0.2.0+dirty`). The commit no longer describes what
+#     is running, and a version that quietly claims otherwise is worse than no version at all.
+#     Untracked files count: a new .go file is compiled in like any other.
+KAAS_BUILD_DIRTY := $(if $(shell git status --porcelain 2>/dev/null),+dirty,)
+export KAAS_BUILD_VERSION := $(VERSION)$(KAAS_BUILD_DIRTY)
+export KAAS_BUILD_COMMIT  := $(COMMIT)
+export KAAS_BUILD_DATE    := $(shell TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)
+
 # Container lifecycle is driven by Podman Compose.
 COMPOSE      ?= podman compose
 # Default = REAL mode (host-networked worker drives real VMs). Fake mode is base only.

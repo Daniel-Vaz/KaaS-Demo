@@ -56,6 +56,11 @@ services:
     build:
       context: ..
       dockerfile: deploy/Containerfile.worker
+      # Build identity - see the note on `web` in compose.yaml. The worker logs it at start-up.
+      args:
+        - VERSION=${KAAS_BUILD_VERSION:-dev}
+        - COMMIT=${KAAS_BUILD_COMMIT:-unknown}
+        - DATE=${KAAS_BUILD_DATE:-unknown}
     # The only container on the host network - so it can SSH to VMs on virbr0
     # (192.168.122.0/24) and reach the published Postgres at localhost:5432.
     network_mode: host
@@ -319,6 +324,12 @@ services:
     build:
       context: ..
       dockerfile: deploy/Containerfile.shell
+      # Build identity - see the note on `web` in compose.yaml. The agents share internal/ with the
+      # api and worker, so a version skew between them is a wire-protocol hazard: stamp them too.
+      args:
+        - VERSION=${KAAS_BUILD_VERSION:-dev}
+        - COMMIT=${KAAS_BUILD_COMMIT:-unknown}
+        - DATE=${KAAS_BUILD_DATE:-unknown}
     network_mode: host
     environment:
       - KAAS_SHELL_LISTEN=:8082
@@ -371,6 +382,11 @@ services:
     build:
       context: ..
       dockerfile: deploy/Containerfile.nodessh
+      # Build identity - see the note on `web` in compose.yaml, and on `shell` above.
+      args:
+        - VERSION=${KAAS_BUILD_VERSION:-dev}
+        - COMMIT=${KAAS_BUILD_COMMIT:-unknown}
+        - DATE=${KAAS_BUILD_DATE:-unknown}
     network_mode: host
     environment:
       - KAAS_NODE_SSH_LISTEN=:8084
