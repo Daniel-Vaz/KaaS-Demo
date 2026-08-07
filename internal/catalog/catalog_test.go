@@ -31,8 +31,8 @@ func TestResolveBundle(t *testing.T) {
 	if rb.Kubernetes != "1.36.2" {
 		t.Fatalf("k8s = %q, want 1.36.2", rb.Kubernetes)
 	}
-	if rb.CNI.Name != "cilium" || rb.CNI.Version != "1.19.5" || rb.CNI.Type != "cni" {
-		t.Fatalf("cni = %+v, want cilium/1.19.5/cni", rb.CNI)
+	if rb.CNI.Name != "cilium" || rb.CNI.Version != "1.20.0" || rb.CNI.Type != "cni" {
+		t.Fatalf("cni = %+v, want cilium/1.20.0/cni", rb.CNI)
 	}
 	// Non-CNI add-ons only, versions pinned by the bundle. metallb + envoy-gateway ship by default so
 	// every cluster comes up with a LoadBalancer implementation and a default Gateway API, external-dns
@@ -42,9 +42,9 @@ func TestResolveBundle(t *testing.T) {
 	// disk every worker is born with. external-secrets ships by default too, so every cluster is wired
 	// to the platform's central Vault (a ClusterSecretStore over a per-cluster JWT auth role).
 	want := map[string]string{
-		"metrics-server": "3.13.1", "kube-prometheus-stack": "87.16.1", "trivy-operator": "0.34.0",
-		"metallb": "0.16.1", "envoy-gateway": "v1.8.2", "external-dns": "1.21.1", "cert-manager": "1.21.0",
-		"longhorn": "1.12.0", "external-secrets": "2.7.0",
+		"metrics-server": "3.13.1", "kube-prometheus-stack": "88.2.0", "trivy-operator": "0.35.0",
+		"metallb": "0.16.1", "envoy-gateway": "v1.8.2", "external-dns": "1.21.1", "cert-manager": "v1.21.1",
+		"longhorn": "1.12.0", "external-secrets": "2.8.0",
 	}
 	if len(rb.Addons) != len(want) {
 		t.Fatalf("addons = %d, want %d", len(rb.Addons), len(want))
