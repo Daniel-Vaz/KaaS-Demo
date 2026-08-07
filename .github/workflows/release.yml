@@ -219,7 +219,7 @@ jobs:
         run: |
           mkdir -p /tmp/digests
           echo "${{ matrix.component }} ${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.component }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: digest-${{ matrix.component }}
           path: /tmp/digests/${{ matrix.component }}
