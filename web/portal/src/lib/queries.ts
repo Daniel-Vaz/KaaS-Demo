@@ -78,6 +78,10 @@ export const qk = {
   secret: (id: string, ns: string, name: string) => ['clusters', id, 'secret', ns, name] as const,
   secretManifest: (id: string, ns: string, name: string) =>
     ['clusters', id, 'secret', ns, name, 'manifest'] as const,
+  registry: () => ['registry'] as const,
+  registryRepos: (project: string) => ['registry', project, 'repositories'] as const,
+  registryArtifacts: (project: string, repo: string) => ['registry', project, 'artifacts', repo] as const,
+  clusterRegistry: (id: string) => ['clusters', id, 'registry'] as const,
   monitoringMeta: (id: string) => ['clusters', id, 'monitoring', 'meta'] as const,
   storageApps: (id: string) => ['clusters', id, 'storage', 'apps'] as const,
   monitoringTab: (id: string, tab: string, window: string) =>
@@ -917,5 +921,52 @@ export function useDeleteGroup() {
     },
     onError: (err) =>
       notifications.show({ color: 'red', title: 'Could not delete group', message: errText(err) }),
+  });
+}
+
+// ---- image registry (the Registry page) ----
+//
+// A registry is not a live system in the way a cluster is: images arrive when someone pushes one, so
+// this polls on the same relaxed cadence as storage rather than the workload one. The project list
+// carries the actor's role on each project, resolved server-side.
+
+const REGISTRY_POLL_MS = 20000;
+
+export function useRegistry() {
+  return useQuery({
+    queryKey: qk.registry(),
+    queryFn: () => api.getRegistry(),
+    refetchInterval: REGISTRY_POLL_MS,
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useRegistryRepositories(project: string | undefined, enabled: boolean) {
+  return useQuery({
+    queryKey: qk.registryRepos(project ?? ''),
+    queryFn: () => api.listRegistryRepositories(project as string),
+    enabled: !!project && enabled,
+    refetchInterval: REGISTRY_POLL_MS,
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useRegistryArtifacts(project: string | undefined, repo: string | undefined) {
+  return useQuery({
+    queryKey: qk.registryArtifacts(project ?? '', repo ?? ''),
+    queryFn: () => api.listRegistryArtifacts(project as string, repo as string),
+    enabled: !!project && !!repo,
+    staleTime: 15 * 1000,
+  });
+}
+
+// useClusterRegistry backs the one-line registry fact on the cluster detail page. It is cheap and
+// changes only when the cluster's wiring step runs, so it does not poll.
+export function useClusterRegistry(id: string | undefined) {
+  return useQuery({
+    queryKey: qk.clusterRegistry(id ?? ''),
+    queryFn: () => api.getClusterRegistry(id as string),
+    enabled: !!id,
+    staleTime: 30 * 1000,
   });
 }

@@ -76,6 +76,7 @@ Each seam picks a fake or real implementation. See
 | `KAAS_AUDIT` | `fake` | `fake` \| `worker` - the cluster Audit tab (apiserver logs) |
 | `KAAS_TUNNEL` | `fake` | `fake` \| `worker` - the "Open UI" links to in-cluster Grafana/etc. |
 | `KAAS_VAULT` | `fake` | `fake` \| `real` - the secret store ([Vault](integrations/vault.md)) |
+| `KAAS_REGISTRY` | `fake` | `fake` \| `real` - the image registry ([Registry](integrations/registry.md)) |
 | `KAAS_DNS` | `fake` | `fake` \| `nsupdate` \| `winrm` - [cluster DNS](integrations/dns.md) (worker only) |
 | `KAAS_ADDON_VALUES` | `auto` | `auto` \| `helm` \| `fake` - source of chart `values.yaml` for the in-browser editor |
 
@@ -229,6 +230,32 @@ Full guide: [Vault](integrations/vault.md).
 | `KAAS_VAULT_INSECURE` | `0` | `1` accepts a self-signed Vault cert |
 | `KAAS_VAULT_TOKEN_TTL` | - | Bounds a minted handoff token's validity |
 
+### Container image registry (optional)
+
+Full guide: [Container image registry](integrations/registry.md).
+
+**The two addresses are not the same.** `KAAS_REGISTRY_URL` is this process's own route to the
+registry API; `KAAS_REGISTRY_HOST` is what a cluster **node** puts in an image reference and in its
+containerd configuration, so it must be routable from the VMs and must appear in the certificate's
+SANs. Collapsing them produces `x509: certificate is valid for ...` on every node of every cluster.
+
+| Var | Default | Meaning |
+|---|---|---|
+| `KAAS_REGISTRY` | `fake` | `fake` \| `real` |
+| `KAAS_REGISTRY_URL` | - | Registry API address - this process's own route |
+| `KAAS_REGISTRY_HOST` | = `URL`'s host | What CLUSTER NODES dial; in image references and the cert's SANs |
+| `KAAS_REGISTRY_UI_URL` | = `KAAS_REGISTRY_URL` | Browser-facing base for the portal's "Open Harbor" link |
+| `KAAS_REGISTRY_USERNAME` / `_PASSWORD` | - | The worker's admin credential; the API's should be a read-only robot |
+| `KAAS_REGISTRY_PROJECT_PREFIX` | `kaas-` | Namespaces every project the platform owns |
+| `KAAS_REGISTRY_AUTH_MODE` | `$KAAS_AUTH` | The auth mode the registry assumes. Set on the **worker**, which needs the mode but must not be given `KAAS_AUTH` (every seam reads it, and the Vault seam refuses to start on `ldap` without directory settings). The compose overlay and chart set it for you |
+| `KAAS_REGISTRY_MIRROR` | `1` | Pull-through caches + every node's containerd mirror config |
+| `KAAS_REGISTRY_DOCKERHUB_USERNAME` / `_PASSWORD` | unset | Authenticates the Docker Hub proxy cache (avoids the fleet sharing one anonymous rate limit) |
+| `KAAS_REGISTRY_INSECURE` | `0` | `1` = plain HTTP / skip verification, platform-side AND on every node |
+| `KAAS_REGISTRY_CA_FILE` | unset | PEM handed to every cluster node so it trusts the registry |
+| `KAAS_REGISTRY_RETAIN_PROJECT` | `0` | `1` keeps a deleted cluster's project and images |
+| `KAAS_REGISTRY_PROJECT_QUOTA_GB` | `0` | Per-cluster project storage cap; 0 = unlimited |
+| `KAAS_REGISTRY_ROBOT_TTL` | `8760h` | Life of a cluster's push/pull credential |
+
 ## Self-healing
 
 All worker-only, all on by default. Behaviour is described in [Keeping clusters
@@ -305,7 +332,7 @@ Every node uses its size's resources, so an HA `small` cluster with 2 workers is
 
 | Target | What it does |
 |---|---|
-| `make up` / `down` / `nuke` | real-mode stack up / down (deletes clusters first) / down + wipe DB volume |
+| `make up` / `down` | real-mode stack up (with Harbor when configured) / full cleanup: deletes clusters, stops every container, prunes every volume |
 | `make up-fake` / `down-fake` | fake-mode stack (no worker) |
 | `make up-scale` / `down-scale` | scaled real-mode stack (`WEB=3 API=3 WORKER=4` to override) |
 | `make logs` / `ps` (+ `-fake` / `-scale`) | follow logs / status |

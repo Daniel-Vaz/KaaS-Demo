@@ -232,6 +232,42 @@ spec:
             {{- end }}
             {{- end }}
             {{- end }}
+            {{- if .Values.registry.url }}
+            # Which auth mode this deployment uses - NOT the directory's credentials, which stay on
+            # the api alone. The worker needs the mode because SyncAccess mints a local registry
+            # account per user in local mode and must not in directory mode (that shadows every
+            # directory user, and a registry refuses to change auth mode once its database holds
+            # users). With no directory settings to write, it still leaves the auth configuration to
+            # the api.
+            #
+            # Registry-SCOPED on purpose: plain KAAS_AUTH is read by every seam, and the Vault one
+            # refuses to start on "ldap" without the directory settings - setting it here stops the
+            # worker booting, which stops all reconciliation. See deploy/compose.harbor.yaml.
+            - name: KAAS_REGISTRY_AUTH_MODE
+              value: {{ .Values.auth.mode | default "local" | quote }}
+            # The image registry's ADMIN credential: this pod creates projects, robots and
+            # memberships and configures every cluster node to pull through the cache. It stays out
+            # of the api Deployment like every other provisioning credential - the api gets a
+            # read-only robot instead (see api.yaml).
+            - name: KAAS_REGISTRY_USERNAME
+              value: {{ .Values.registry.username | quote }}
+            - name: KAAS_REGISTRY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kaas.secretName" . }}
+                  key: registry-password
+            {{- if .Values.registry.dockerhubUsername }}
+            # Docker Hub credentials for the proxy cache. Without them the cache pulls anonymously
+            # and the WHOLE fleet shares one anonymous rate limit.
+            - name: KAAS_REGISTRY_DOCKERHUB_USERNAME
+              value: {{ .Values.registry.dockerhubUsername | quote }}
+            - name: KAAS_REGISTRY_DOCKERHUB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kaas.secretName" . }}
+                  key: registry-dockerhub-password
+            {{- end }}
+            {{- end }}
             {{- if $remote }}
             # Remote hypervisor: libvirt over SSH, Ansible through a ProxyCommand, kubectl/helm
             # through the SOCKS tunnel this pod opens for itself on its own loopback.
@@ -258,6 +294,13 @@ spec:
           volumeMounts:
             - name: work
               mountPath: /work
+            {{- if .Values.registry.caCert }}
+            # The CA the worker hands every cluster node, so they trust the registry.
+            - name: registry-ca
+              mountPath: /etc/kaas/registry-ca.crt
+              subPath: registry-ca.crt
+              readOnly: true
+            {{- end }}
             {{- if $real }}
             - name: images
               mountPath: /srv/images
@@ -271,6 +314,14 @@ spec:
             {{- end }}
             {{- end }}
       volumes:
+        {{- if .Values.registry.caCert }}
+        - name: registry-ca
+          secret:
+            secretName: {{ include "kaas.secretName" . }}
+            items:
+              - key: registry-ca
+                path: registry-ca.crt
+        {{- end }}
         - name: work
           {{- if .Values.worker.workspace.enabled }}
           persistentVolumeClaim:

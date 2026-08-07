@@ -1,0 +1,108 @@
+# Point the platform at Harbor - the container image registry (internal/registry).
+#
+# The Makefile adds this overlay to every bring-up, but ONLY when deploy/harbor/harbor.yml exists -
+# so configuring Harbor is what enables it, and a tree without that file behaves exactly as it did
+# before (fake registry seam, no dead address to dial). `make up` also starts Harbor itself, and
+# `make down` stops it - its images survive in harbor.yml's `data_volume` either way.
+#
+# WHAT IS *NOT* HERE, deliberately: Harbor's own eight containers. Harbor ships an installer whose
+# `prepare` step generates its compose file and every internal config (nginx, the registry, the token
+# service, the database bootstrap) from one harbor.yml. Hand-copying that into this repo would mean
+# maintaining a vendored fork of Harbor's deployment for no benefit and re-deriving it on every
+# Harbor release - so `make harbor-up` runs the real thing (deploy/harbor/, scripts/harbor.sh) and
+# this overlay only tells the platform where it ended up.
+#
+# WHY CONFIGURATION IS THE SWITCH, rather than Harbor being always-on like the single dev-mode
+# `vault` container: Harbor is roughly eight containers and 1.5-2 GB of RSS, on the very laptop whose
+# remaining capacity IS the VM budget the platform's quota exists to guard (CLAUDE.md, "Hard
+# environment constraints"). Keying it on harbor.yml keeps both things true - a deployment that wants
+# a registry gets it from a plain `make up`, and one that does not is never asked to find room for
+# it. Without that file KAAS_REGISTRY stays `fake`, the Registry page renders synthesized data, and
+# no cluster is configured to pull through anything.
+name: kaas-demo
+
+services:
+  api:
+    environment:
+      - KAAS_REGISTRY=${KAAS_REGISTRY:-real}
+      # The API's own route to Harbor. Harbor runs in its own compose project, so this goes over the
+      # container host rather than a compose service name - the same shape as the real worker's route
+      # to Vault.
+      - KAAS_REGISTRY_URL=${KAAS_REGISTRY_URL:-http://host.containers.internal:8090}
+      # What a cluster NODE puts in an image reference, and what must be in the certificate's SANs.
+      # NOT the API's own route: a VM cannot resolve host.containers.internal. On a laptop this is
+      # the WSL2 host's LAN address, e.g. 192.168.1.20:8090. Leaving it empty falls back to the URL's
+      # host, which is right only when both genuinely share one route. See internal/registry.Settings.
+      - KAAS_REGISTRY_HOST=${KAAS_REGISTRY_HOST:-}
+      # Browser-facing, for the portal's "Open Harbor" button.
+      - KAAS_REGISTRY_UI_URL=${KAAS_REGISTRY_UI_URL:-http://localhost:8090}
+      # The API's credential. Defaulting it to the SAME admin account the worker holds is a
+      # documented lab shortcut - it is what makes the portal's "Generate password" button work, since
+      # only an admin can set another account's password. Give the API a read-only robot instead (see
+      # docs/deploy/integrations/registry.md) and the button hides itself, which is the production
+      # shape: the API then holds a credential that can only read.
+      - KAAS_REGISTRY_USERNAME=${KAAS_REGISTRY_USERNAME:-admin}
+      - KAAS_REGISTRY_PASSWORD=${KAAS_REGISTRY_PASSWORD:-Harbor12345}
+      # Plain HTTP by default, which is what `make harbor-up` sets Harbor up for. Production sets
+      # KAAS_REGISTRY_CA_FILE and drops this - the same code path then serves TLS and distributes the
+      # CA to every cluster node.
+      - KAAS_REGISTRY_INSECURE=${KAAS_REGISTRY_INSECURE:-1}
+      - KAAS_REGISTRY_CA_FILE=${KAAS_REGISTRY_CA_FILE:-}
+      - KAAS_REGISTRY_PROJECT_PREFIX=${KAAS_REGISTRY_PROJECT_PREFIX:-kaas-}
+      # The pull-through cache. On by default when a registry is configured: it is most of the value
+      # (docs/deploy/integrations/registry.md), and it degrades to the upstream on its own when
+      # Harbor is down. Turn it off to run Harbor as a tenant registry only - the two halves are
+      # independent by construction.
+      - KAAS_REGISTRY_MIRROR=${KAAS_REGISTRY_MIRROR:-1}
+      - KAAS_REGISTRY_RETAIN_PROJECT=${KAAS_REGISTRY_RETAIN_PROJECT:-0}
+      - KAAS_REGISTRY_PROJECT_QUOTA_GB=${KAAS_REGISTRY_PROJECT_QUOTA_GB:-0}
+    volumes:
+      # The CA the platform hands cluster nodes, when TLS is configured. Read-only, and absent by
+      # default (compose tolerates a missing bind only if the path exists, so the default points at
+      # the repo's own example file rather than nothing).
+      - ${KAAS_REGISTRY_CA_HOST_FILE:-./harbor/ca.example.crt}:/etc/kaas/registry-ca.crt:ro
+
+  # The worker is the reconciler in real mode, so it holds the ADMIN credential: it creates projects,
+  # robots and memberships, and it configures every cluster node's containerd to pull through the
+  # cache. Same split as Vault (management token on the worker, narrow one on the API) and the LDAP
+  # bind password (API only).
+  #
+  # This service block is inert in fake mode, which starts no worker.
+  worker:
+    environment:
+      # The worker is told WHICH auth mode this deployment uses, but never the directory's
+      # credentials - the mode is not a secret, `ldap.yaml` and the bind password are, and those stay
+      # on the api alone (compose.yaml). It needs the mode because SyncAccess mints a LOCAL registry
+      # account per user in local mode and must NOT in directory mode: doing it there shadows every
+      # directory user, and a registry refuses to change auth mode once its database holds users, so
+      # the first sweep would permanently lock the registry into the wrong one. With no directory
+      # settings to write, the worker still stands down from configuring auth at all (ManageAuth) -
+      # the api does that.
+      #
+      # It is a REGISTRY-SCOPED variable and not KAAS_AUTH itself, because KAAS_AUTH is read by every
+      # seam: the Vault one refuses to start on `ldap` without the directory settings, so setting it
+      # here killed the worker at boot - and a worker that will not start is a control plane where
+      # nothing reconciles and no cluster ever leaves Pending.
+      - KAAS_REGISTRY_AUTH_MODE=${KAAS_AUTH:-local}
+      - KAAS_REGISTRY=${KAAS_REGISTRY:-real}
+      # The worker is --network host, so it reaches Harbor over the host like it reaches Vault.
+      - KAAS_REGISTRY_URL=${KAAS_REGISTRY_WORKER_URL:-http://localhost:8090}
+      # The address baked into every image reference and into every node's containerd config. This
+      # one is NOT the worker's own route and must be reachable from the cluster VMs.
+      - KAAS_REGISTRY_HOST=${KAAS_REGISTRY_HOST:-}
+      - KAAS_REGISTRY_USERNAME=${KAAS_REGISTRY_USERNAME:-admin}
+      - KAAS_REGISTRY_PASSWORD=${KAAS_REGISTRY_PASSWORD:-Harbor12345}
+      - KAAS_REGISTRY_INSECURE=${KAAS_REGISTRY_INSECURE:-1}
+      - KAAS_REGISTRY_CA_FILE=${KAAS_REGISTRY_CA_FILE:-}
+      - KAAS_REGISTRY_PROJECT_PREFIX=${KAAS_REGISTRY_PROJECT_PREFIX:-kaas-}
+      - KAAS_REGISTRY_MIRROR=${KAAS_REGISTRY_MIRROR:-1}
+      - KAAS_REGISTRY_RETAIN_PROJECT=${KAAS_REGISTRY_RETAIN_PROJECT:-0}
+      - KAAS_REGISTRY_PROJECT_QUOTA_GB=${KAAS_REGISTRY_PROJECT_QUOTA_GB:-0}
+      - KAAS_REGISTRY_ROBOT_TTL=${KAAS_REGISTRY_ROBOT_TTL:-8760h}
+      # Docker Hub credentials for the proxy cache. Without them the cache pulls anonymously and the
+      # WHOLE fleet shares one anonymous rate limit - which is one of the failures this integration
+      # exists to remove, so it is worth setting even for a lab.
+      - KAAS_REGISTRY_DOCKERHUB_USERNAME=${KAAS_REGISTRY_DOCKERHUB_USERNAME:-}
+      - KAAS_REGISTRY_DOCKERHUB_PASSWORD=${KAAS_REGISTRY_DOCKERHUB_PASSWORD:-}
+    volumes:
+      - ${KAAS_REGISTRY_CA_HOST_FILE:-./harbor/ca.example.crt}:/etc/kaas/registry-ca.crt:ro

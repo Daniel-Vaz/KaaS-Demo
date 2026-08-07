@@ -1,0 +1,9 @@
+# Placeholder so the compose bind mount in deploy/compose.harbor.yaml always resolves.
+#
+# The real file is the CA certificate that signed the registry's TLS certificate. Point
+# KAAS_REGISTRY_CA_HOST_FILE at it and set KAAS_REGISTRY_CA_FILE=/etc/kaas/registry-ca.crt; the
+# worker then reads it once at start-up and hands it to every cluster node, which installs it into
+# the system trust store and into containerd's certs.d (the registry_trust ansible role).
+#
+# Left as-is, the platform runs the registry over plain HTTP (KAAS_REGISTRY_INSECURE=1), which is
+# the lab default and must not be production's.

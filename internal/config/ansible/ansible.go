@@ -22,6 +22,7 @@ import (
 	"github.com/Daniel-Vaz/KaaS-demo/internal/domain"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/events"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/procstream"
+	"github.com/Daniel-Vaz/KaaS-demo/internal/registry"
 )
 
 type Config struct {
@@ -42,6 +43,14 @@ type Config struct {
 	// role's own defaults.
 	EtcdQuotaBytes          int64
 	EtcdCompactionRetention string
+
+	// Registry is what a cluster node needs in order to pull through the platform's image registry:
+	// the CA to trust and the containerd mirror list. It is injected into every playbook's extra-vars
+	// (see registryVars) so the registry_trust role runs on the bootstrap path, before the first
+	// image pull. Deployment-level and CREDENTIAL-FREE - it is derived from configuration alone, so
+	// every worker replica renders the same thing with no coordination. The zero value means this
+	// deployment has no registry, and the role does nothing.
+	Registry registry.NodeTrust
 }
 
 type Manager struct{ cfg Config }
@@ -738,6 +747,15 @@ func (m *Manager) playbook(ctx context.Context, c *domain.Cluster, name string, 
 	}
 	if m.cfg.EtcdCompactionRetention != "" {
 		extra["etcd_auto_compaction_retention"] = m.cfg.EtcdCompactionRetention
+	}
+	// Registry trust + pull-through mirrors ride on EVERY play, for the same reason the etcd tuning
+	// does and one more: the `common` role (which carries registry_trust) runs on the bootstrap,
+	// join, rejoin and restore paths, and a node that missed the configuration on any one of them
+	// would silently pull from the internet forever. Threading it into those call sites individually
+	// is exactly the drift this avoids. Absent when no registry is configured, and the role is a
+	// no-op then. See internal/config/ansible/registry.go.
+	for k, v := range m.registryVars() {
+		extra[k] = v
 	}
 	b, err := json.MarshalIndent(extra, "", "  ")
 	if err != nil {

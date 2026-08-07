@@ -130,8 +130,9 @@ Other ways in, depending on what you are changing:
 | The browser (WebAssembly) demo | `make demo-dev` |
 | Real VMs | copy [`.env.example`](.env.example) to `.env`, then `make up` |
 
-`make down` deletes any running clusters before stopping the stack; `make nuke` also drops the
-database volume. Please use them rather than `podman rm` - a stack removed underneath live clusters
+`make down` deletes any running clusters before stopping the stack, then removes every container
+(Harbor included) and prunes every volume - a full cleanup, so the next `make up` starts from an
+empty database. Please use it rather than `podman rm` - a stack removed underneath live clusters
 leaves orphaned VMs behind.
 
 ## Making a change

@@ -50,6 +50,9 @@ KubeHarbor works out of the box, and layers in these when you configure them:
   address automatically.
 - [**HashiCorp Vault**](integrations/vault.md) - a per-cluster secret store, consumed in-cluster by
   External Secrets and surfaced in the portal.
+- [**Container image registry**](integrations/registry.md) - one Harbor beside the platform: a
+  private project per cluster, memberships mirroring the portal's own model, and pull-through caches
+  of the public registries every cluster pulls from.
 - [**NetBox IPAM**](integrations/netbox.md) - record the addresses shared-network clusters occupy.
 
 ## Keeping a deployment running
@@ -57,7 +60,9 @@ KubeHarbor works out of the box, and layers in these when you configure them:
 - **Two volumes hold everything that outlives a container**: `pgdata` (Postgres - the single source of
   truth) and `workdata` (each cluster's OpenTofu state, a derived cache). Everything else - the app
   binaries, the OpenTofu/Ansible/Helm toolchain, the provider plugins - is baked into images you can
-  rebuild and recreate freely (`make rebuild`) without disturbing running clusters.
+  rebuild and recreate freely (`make rebuild`) without disturbing running clusters. They outlive
+  container *recreation*, not `make down`, which is a full cleanup and prunes them - it deletes every
+  cluster first, so there is no state left to keep.
 - **Never change `KAAS_SECRET_KEY` across an upgrade.** It derives the key that encrypts every stored
   kubeconfig and signs every session - rotate it and the stored secrets no longer decrypt. Keep it
   stable in `.env`.

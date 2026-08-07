@@ -76,6 +76,12 @@ act** - a repairer without those is a cluster shredder.
   gives each cluster its own KV subtree and policies mirroring the portal's read/write model; the
   bundled **external-secrets** add-on consumes it in-cluster, and the portal's Secrets page surfaces it.
   See *Secret store*.
+- **Image registry:** an optional central **Harbor** (`internal/registry`, real impl
+  `internal/registry/harbor`) gives each cluster a private project plus a push/pull robot, mirrors the
+  portal's read/write model onto its project memberships, and (with the mirror on) proxies the public
+  registries every cluster pulls from so add-on images come over the LAN. Deployed from Harbor's own
+  installer (`scripts/harbor.sh`), and enabled by *configuring* it - `deploy/harbor/harbor.yml`
+  existing is what makes every `make up` bring it along. See *Image registry*.
 - **Catalog:** `internal/catalog/catalog.json` - OS images, Kubernetes versions, add-ons, and
   release *bundles* with `supersedes` upgrade chains. Editing versions is a data change. The default
   bundle ships a batteries-included set: Cilium (CNI), Longhorn (storage), MetalLB + Envoy Gateway
@@ -125,6 +131,7 @@ keep the system runnable and testable without KVM or a database.
 | `tunnel.Proxier` | `KAAS_TUNNEL` | synthesized landing page | worker-proxied HTTP to in-cluster UIs (`services/proxy`) |
 | `dns.Registrar` | `KAAS_DNS` | logs what it would publish | `nsupdate` RFC 2136 dynamic update (GSS-TSIG) |
 | `vault.Manager` | `KAAS_VAULT` | in-memory (logs) | HashiCorp Vault (`internal/vault/hcvault`) |
+| `registry.Manager`/`Querier` | `KAAS_REGISTRY` | in-memory + synthesized projects | Harbor (`internal/registry/harbor`) |
 
 **Directory authentication** (`internal/authn`) is the one seam whose axis is not fake/real but
 *mechanism*: `KAAS_AUTH=local|ldap` decides whether the portal authenticates against Active
@@ -549,6 +556,114 @@ Load-bearing:
 compose `vault` service is a **dev-mode** Vault (auto-unsealed, a fixed root token, in-memory storage)
 - a deliberate lab shortcut. The Fake records state in memory and logs, so admission, wiring, the
 Secrets page, and the handoff are all demoable under `make up-fake` with no Vault at all.
+
+## Image registry (Harbor + pull-through caches)
+
+The platform's tenant-facing image registry is a **single, central Harbor** (`internal/registry`,
+seams `registry.Manager` + `registry.Querier`, real impl `internal/registry/harbor`, selected by
+`KAAS_REGISTRY=fake|real`). Same shape as the Vault integration, because it is the same problem: one
+central service that knows nothing about the platform's model, kept converged with Postgres by the
+platform as its single writer. "Per-cluster" means a **project**, never a registry per cluster:
+
+```
+kaas-library                platform-owned images (public - nodes pull with no credential)
+kaas-cache-<upstream>       pull-through proxies of docker.io/ghcr.io/quay.io/registry.k8s.io (public)
+kaas-<cluster name>         one PRIVATE project per cluster, the tenant's own images
+```
+
+Unlike Vault it is enabled **by configuration rather than by default**: creating
+`deploy/harbor/harbor.yml` is what makes every `make up` bring Harbor up and point the platform at it
+(the Makefile keys the compose overlay on that file's existence). Harbor is ~8 containers and 1.5-2
+GB of RSS on the very host whose remaining capacity **is** the VM budget quota exists to guard, so a
+tree without that file must behave exactly as it did before - and does. A secret store costing one small container can be always-on; this cannot. Harbor itself is
+deployed from **its own installer** (`scripts/harbor.sh` drives `prepare`), not vendored into the
+repo - `deploy/compose.harbor.yaml` carries only the platform's `KAAS_REGISTRY_*` wiring, and the
+Helm chart takes `goharbor/harbor` as a default-off dependency beside the Vault one.
+
+**Authorization mirrors the platform**, exactly as Vault's does: `DesiredAccess` is the pure mapping
+(owner → projectAdmin, write-role group-mate → developer, read-role → guest, platform admin → a
+registry SYSTEM admin so no per-cluster rows are needed), `SyncAccess` applies it under the leader
+lease on a ticker (membership edits are API-side writes that never bump a generation). The auth
+backend follows `KAAS_AUTH` (local → Harbor's own user database, ldap → the same directory, from the
+same mounted `ldap.yaml`).
+
+Seven things are load-bearing:
+
+- **The auth backend is written by the API, not the worker** - `EnsureAuth` is a seam method of its
+  own precisely so it can run somewhere `EnsurePlatform` cannot. Configuring it needs the directory
+  settings, and those reach **only the API** (the bind password deliberately never enters the
+  container holding the libvirt socket and every tenant's secrets); `EnsurePlatform` is leader-elected
+  work on the **worker**. Folding auth into it - the obvious shape, and the one this started as -
+  means the branch never runs and Harbor sits on its own default forever while the platform reports
+  success. `Settings.ManageAuth` is the guard: an **unset** `KAAS_AUTH` means "this process was told
+  nothing", not "local", so it leaves the registry's configuration alone rather than guessing - and
+  guessing wrong locks every user out. Symmetrically, `Status.AuthMode` reports the mode **read back
+  from Harbor**, never the configured intent: the two legitimately diverge, and that divergence is the
+  one thing the field is read to discover.
+- **Knowing the auth MODE and being able to WRITE it are separate, and conflating them creates shadow
+  accounts.** The mode is not a secret; `ldap.yaml` and the bind password are. So the worker is given
+  the mode as **`KAAS_REGISTRY_AUTH_MODE`** - registry-scoped, *not* `KAAS_AUTH`, which every seam
+  reads and which the **Vault** seam rejects outright without directory settings, so setting it there
+  stops the worker booting and with it all reconciliation (`TestWorkerStartsWithRegistryLdapModeAndNoDirectory`).
+  It needs the mode because `SyncAccess` mints a **local Harbor
+  account per user** in local mode and must not in ldap mode. `Settings.Validate` therefore requires
+  the LDAP block only when `ManageAuth` - it used to require it unconditionally, which forced the
+  worker to relabel itself `local`, so on a directory deployment it silently created a shadow account
+  for every directory user. That is unrecoverable in place: **Harbor refuses to change `auth_mode`
+  once its database holds any user**, so the first sweep permanently pinned the registry to `db_auth`
+  and nothing surfaced an error. `TestRegistryKeepsLdapModeWithoutDirectoryConfig` pins it.
+
+- **The two addresses are split, and it bites harder than Vault's.** `KAAS_REGISTRY_URL` is the
+  platform's own route; `KAAS_REGISTRY_HOST` is what a cluster NODE puts in an image reference and in
+  its containerd config. This value is baked into every image reference and must be in the
+  certificate's SANs - collapse them and every node of every cluster fails TLS at bring-up.
+- **Node trust is NOT reconcile-loop work.** A node's first image pull happens during bring-up, long
+  before Ready, so trust applied at Ready arrives after every pull it was meant to accelerate. The
+  `registry_trust` role therefore runs from `common` (bootstrap/join/join-controlplane/rejoin/restore
+  all run it), driven by vars injected into EVERY playbook at the shared point in
+  `ansible.(*Manager).playbook` - threading it into individual call sites is exactly the drift that
+  would leave one path pulling from the internet forever. Hard no-op when unconfigured.
+- **Node trust carries NO credential**, and that is a decision rather than an omission. The obvious
+  fleet-wide pull-only robot fails three ways: containerd 2.x removed static registry auth from
+  `config.toml` (so the secret would sit in a Basic header in a file on every tenant's VM), a Harbor
+  robot's secret is returned only at creation (so replicas that each re-minted it would invalidate
+  each other's copy), and it puts a standing fleet credential on every node for no gain. The caches
+  are **public** instead - they hold public upstream images. Private images use the cluster's own
+  project and the per-cluster robot, delivered as an ordinary imagePullSecret. The structural payoff:
+  with no minted secret in it, `NodeTrust` is a pure function of settings + CA file, so every worker
+  replica derives it identically with no coordination and a **non-leader** replica can still
+  configure a node.
+- **`EnsureCluster` must not rotate an existing robot.** Harbor returns a robot's secret only at
+  creation; a level-triggered re-run therefore returns the identity with an empty secret, and the
+  reconciler falls back to the sealed copy. Storing the secretless credential instead would hand the
+  cluster a pull Secret that cannot authenticate - discovered only when a pod next pulled.
+- **Release-before-destroy, for a sharper reason than Vault's.** A project is named after the
+  CLUSTER and cluster names are reusable, so a project outliving its cluster is silently inherited by
+  the next cluster of that name - one tenant handed another's images
+  (`TestRegistryReleasedBeforeDestroy`).
+- **The mirror is independent of the registry.** `KAAS_REGISTRY_MIRROR=0` keeps per-cluster projects
+  and stops pointing nodes at the caches. That separation is what makes the pull-through cache a
+  cheap bet: if it does not pay off on a given host, the retreat costs nothing.
+
+**Is pre-pulling worth it?** Yes for the cache, no for curated replication. The golden image already
+bakes the kubeadm control-plane images, so the remaining cost is the add-on wave - ~1.5-2 GB per
+node, re-paid on every node of every cluster and again on every rolling OS upgrade, repair-replace
+and scale-up. The cache needs no curation (the first cluster populates it) and removes Docker Hub's
+anonymous rate limit as a cause of failed installs; a hand-maintained image list would need
+re-deriving on every catalog bump for a marginal gain, and its one unique benefit (air-gap) is not a
+goal. `make registry-warm` is the middle path: it derives the current bundle's images with `helm
+template` and pulls them once through the cache, closing the first-cluster gap - a make target, not
+reconcile work, because it is deployment-time hygiene rather than desired state. It degrades safely
+in every case: each `hosts.toml` keeps the upstream as its `server`, so a registry outage costs pull
+speed, never cluster bring-up. *Numbers to be measured on real hardware, not asserted* - see
+`docs/deploy/integrations/registry.md`.
+
+*Production would* mint a read-only robot for the API rather than defaulting it to the admin account
+(that default is what enables the portal's self-service password button, and it is a documented
+widening), rotate cluster robots on a cadence (the expiry is already stamped as
+`Cluster.RegistryRobotNotAfter`, ready for a cert-renewal-shaped due-scan), front both the portal and
+Harbor with an OIDC IdP so no password is ever generated or copied, and sign images (cosign/Notation)
+rather than relying on Harbor's scan-on-push alone.
 
 ## Node pools
 

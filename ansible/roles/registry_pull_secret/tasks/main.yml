@@ -1,0 +1,58 @@
+---
+# Apply the cluster's own image-registry credential as a Kubernetes imagePullSecret, so workloads can
+# pull from (and CI can push to) the cluster's private project without anyone minting a credential by
+# hand. Invoked by internal/config/ansible.EnsureRegistryPullSecret from reconcileRegistryWiring.
+#
+# Runs on the first control plane with admin.conf, like default_gateway and external_secrets - a
+# Secret is a namespaced object, so it must not be applied once per control-plane node.
+#
+# Vars from Go: registry_host, registry_secret_name, registry_secret_namespace,
+# registry_robot_username, registry_robot_secret.
+#
+# The dockerconfigjson is built here rather than in Go so the credential never becomes a rendered Go
+# string that could end up in a log line; it is written 0600, applied, and removed.
+
+- name: Refuse to proceed without a credential
+  ansible.builtin.assert:
+    that:
+      - registry_robot_username | default('') | length > 0
+      - registry_robot_secret | default('') | length > 0
+      - registry_host | default('') | length > 0
+    fail_msg: "registry_host, registry_robot_username and registry_robot_secret are required"
+
+- name: Stage the pull secret
+  ansible.builtin.copy:
+    dest: /etc/kubernetes/kaas-registry-secret.yaml
+    mode: '0600'
+    content: |
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: {{ registry_secret_name }}
+        namespace: {{ registry_secret_namespace }}
+      type: kubernetes.io/dockerconfigjson
+      data:
+        .dockerconfigjson: {{ {
+          'auths': {
+            registry_host: {
+              'username': registry_robot_username,
+              'password': registry_robot_secret,
+              'auth': (registry_robot_username ~ ':' ~ registry_robot_secret) | b64encode
+            }
+          }
+        } | to_json | b64encode }}
+  no_log: true
+
+- name: Apply the pull secret
+  ansible.builtin.command: >-
+    kubectl --kubeconfig /etc/kubernetes/admin.conf apply
+    -f /etc/kubernetes/kaas-registry-secret.yaml
+  register: registry_secret_apply
+  changed_when: "'created' in registry_secret_apply.stdout or 'configured' in registry_secret_apply.stdout"
+
+- name: Remove the staged secret from the node
+  # The credential's home is the platform's sealed store and the cluster's own etcd, not a file on a
+  # control-plane node's disk.
+  ansible.builtin.file:
+    path: /etc/kubernetes/kaas-registry-secret.yaml
+    state: absent

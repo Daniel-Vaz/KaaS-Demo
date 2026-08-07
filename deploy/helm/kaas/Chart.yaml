@@ -17,8 +17,8 @@ type: application
 # informational: `kaas.image` (templates/_helpers.tpl) resolves every image tag from it, so a
 # drifted appVersion makes `helm install` pull a platform nobody released. `make release-check`,
 # which CI runs on every PR, is what keeps them in step.
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "0.2.0"
 
 keywords:
   - kubernetes-as-a-service
@@ -38,3 +38,11 @@ dependencies:
     version: "0.28.1"
     repository: https://helm.releases.hashicorp.com
     condition: vault.enabled
+  # Harbor, the container image registry (internal/registry). Gated on harbor.enabled and DEFAULT
+  # OFF, unlike Vault: Harbor is a substantial deployment (its own Postgres, Redis, registry,
+  # jobservice, portal and core) and most installs will point at a registry that already exists.
+  # Either way the platform only needs KAAS_REGISTRY_* to find one - see values.yaml.
+  - name: harbor
+    version: "1.19.1"
+    repository: https://helm.goharbor.io
+    condition: harbor.enabled

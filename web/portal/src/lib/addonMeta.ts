@@ -7,7 +7,6 @@ import {
   IconRefreshDot,
   IconGitBranch,
   IconGavel,
-  IconBrandDocker,
   IconCoin,
   IconBolt,
   IconKey,
@@ -41,9 +40,8 @@ const META: Record<string, AddonMeta> = {
   metallb: { icon: IconRouter, color: 'grape', category: 'Networking & Ingress' },
   'envoy-gateway': { icon: IconRoute, color: 'indigo', category: 'Networking & Ingress' },
   'external-dns': { icon: IconWorld, color: 'blue', category: 'Networking & Ingress' },
-  argocd: { icon: IconRefreshDot, color: 'cyan', category: 'Delivery & Registry' },
-  flux: { icon: IconGitBranch, color: 'blue', category: 'Delivery & Registry' },
-  harbor: { icon: IconBrandDocker, color: 'blue', category: 'Delivery & Registry' },
+  argocd: { icon: IconRefreshDot, color: 'cyan', category: 'Delivery' },
+  flux: { icon: IconGitBranch, color: 'blue', category: 'Delivery' },
   longhorn: { icon: IconDatabase, color: 'cyan', category: 'Storage' },
   openebs: { icon: IconDatabase, color: 'indigo', category: 'Storage' },
 };
@@ -59,7 +57,7 @@ export const CATEGORY_ORDER = [
   'Observability',
   'Security & Policy',
   'Networking & Ingress',
-  'Delivery & Registry',
+  'Delivery',
   'Storage',
   'Other',
 ];

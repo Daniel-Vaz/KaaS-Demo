@@ -1,4 +1,5 @@
-.PHONY: help up down logs ps restart rebuild psql nuke up-fake down-fake logs-fake \
+.PHONY: help up down logs ps restart rebuild psql up-fake down-fake logs-fake \
+	harbor-up harbor-ensure harbor-down harbor-purge registry-warm \
         up-scale down-scale logs-scale ps-scale helm-lint helm-template images images-push \
         catalog-check catalog-update version release-check bump chart-package \
         _clusters-down build test vet run-api run-worker golden-image golden-image-vsphere golden-image-proxmox golden-images tidy clean \
@@ -30,6 +31,15 @@ COMPOSE      ?= podman compose
 REAL         := -f deploy/compose.yaml -f deploy/compose.real.yaml -f deploy/compose.ports.yaml
 FAKE         := -f deploy/compose.yaml -f deploy/compose.ports.yaml
 SCALE        := -f deploy/compose.yaml -f deploy/compose.real.yaml -f deploy/compose.scale.yaml
+# The image registry (internal/registry) rides along with every bring-up - but only once it has been
+# CONFIGURED. The presence of deploy/harbor/harbor.yml is the switch, which keeps two things true at
+# once: a deployment that wants Harbor gets it from a plain `make up`, and a fresh clone (or a host
+# with no room for ~8 more containers) behaves exactly as it did before, with the fake registry seam
+# and no dead address to dial.
+#
+# The overlay carries only the platform's KAAS_REGISTRY_* wiring; Harbor itself runs from its own
+# installer-generated compose file, started by the harbor-ensure prerequisite below.
+HARBOR       := $(if $(wildcard deploy/harbor/harbor.yml),-f deploy/compose.harbor.yaml,)
 
 # Replica counts for `make up-scale` (override on the command line: make up-scale API=3 WORKER=4).
 # Postgres is deliberately NOT scaled - it is the single source of truth, and real HA Postgres is
@@ -45,24 +55,32 @@ help: ## Show this help
 	@echo ""
 	@echo "  Containers - REAL KVM mode (default; needs libvirt + a .env, see .env.example):"
 	@echo "    make up          Build + start web + api + postgres + host-networked worker (real VMs)"
-	@echo "    make down        Stop and remove the containers (keeps the DB volume)"
+	@echo "    make down        Full cleanup: delete clusters, stop everything incl. Harbor, prune volumes"
+	@echo "                     and Harbor's data (KEEP_CACHE=1 keeps its image cache)"
 	@echo "    make logs        Follow logs (incl. the worker)"
 	@echo "    make ps          Show container status"
 	@echo "    make restart     Recreate the stack"
 	@echo "    make rebuild     Rebuild images and recreate"
 	@echo "    make psql        Open a psql shell in the postgres container"
-	@echo "    make nuke        Stop and remove containers AND the DB volume"
 	@echo "    make kubeconfig CLUSTER=<id>   Fetch a cluster's admin kubeconfig -> /tmp/kubeconfig"
 	@echo ""
 	@echo "  Containers - SCALED (real mode, N replicas behind a load balancer):"
 	@echo "    make up-scale    Start web/api/worker with 2 replicas each (WEB=3 API=3 WORKER=4 to override)"
 	@echo "    make ps-scale    Show every replica"
+	@echo "    make logs-scale  Follow the scaled stack's logs"
 	@echo "    make down-scale  Stop and remove the scaled stack"
 	@echo ""
 	@echo "  Containers - FAKE mode (no KVM, no .env; the API reconciles in-process):"
 	@echo "    make up-fake     Start web + api + postgres with fake providers (test the portal)"
 	@echo "    make down-fake   Stop the fake-mode stack"
 	@echo "    make logs-fake   Follow fake-mode logs"
+	@echo ""
+	@echo "  Image registry - Harbor (opt-in: every 'make up'/'up-fake' brings it along once"
+	@echo "  deploy/harbor/harbor.yml exists; see docs/deploy/integrations/registry.md):"
+	@echo "    make harbor-up      Bring Harbor up on its own"
+	@echo "    make harbor-down    Stop Harbor, keeping its images"
+	@echo "    make harbor-purge   Stop Harbor and DELETE its data (images + database)"
+	@echo "    make registry-warm  Pre-pull the default bundle's images through the cache"
 	@echo ""
 	@echo "  Portal: http://localhost:8080 (nginx serves the SPA + proxies /api to the API on :8081)"
 	@echo ""
@@ -74,10 +92,13 @@ help: ## Show this help
 	@echo "  Static browser demo (the whole control plane as WebAssembly; see docs/demo.md):"
 	@echo "    make demo-dev    Vite dev server running the in-browser demo (no API needed)"
 	@echo "    make demo-build  Build the complete static site into web/portal/dist"
+	@echo "    make demo-wasm   Build just the WebAssembly control plane into public/demo"
 	@echo ""
 	@echo "  Kubernetes (Helm chart, deploy/helm/kaas - N replicas of every tier):"
+	@echo "    make images REGISTRY=...       Build the images (no push)"
 	@echo "    make images-push REGISTRY=...  Build + push the api/web/worker/shell images"
 	@echo "    make helm-lint                 Lint + render the chart in all modes"
+	@echo "    make helm-template             Render the chart to stdout (HELM_ARGS='--set ...')"
 	@echo "    helm install kaas deploy/helm/kaas --set providers=fake   (no hypervisor needed)"
 	@echo ""
 	@echo "  Catalog add-on versions (internal/catalog/catalog.json, needs helm + python3 on the host):"
@@ -99,14 +120,38 @@ help: ## Show this help
 
 # ---- Containers: REAL KVM mode (default) -----------------------------------------------
 
-up: ## Build + start the real-mode stack (web + api + postgres + host-networked worker)
-	$(COMPOSE) $(REAL) up -d --build
+up: harbor-ensure ## Build + start the real-mode stack (web + api + postgres + host-networked worker, + Harbor when configured)
+	$(COMPOSE) $(REAL) $(HARBOR) up -d --build
 	@echo ""
 	@echo "  Portal at http://localhost:8080 (API direct on :8081); the worker drives real VMs."
 	@echo "  Watch it: make logs   Tear down: make down"
 
-down: _clusters-down ## Delete running clusters, then stop + remove the containers (keeps pgdata)
-	$(COMPOSE) $(REAL) down
+# Harbor comes down WITH the platform, because `make up` brought it up: a bring-up switch that is not
+# symmetric is a surprise. It stops AFTER the compose teardown, so the api and worker are never left
+# reconciling against a registry that has already gone.
+#
+# `podman volume prune` runs LAST, once every container is gone. Ordering is the whole point: a
+# volume is pruneable only when no container references it, so pruning while Harbor was still up
+# protected Harbor's ANONYMOUS volumes (the ones its images declare with VOLUME and nothing in the
+# compose file names) and left them dangling forever the moment it stopped. Pruning at the end is
+# what makes this a full cleanup.
+#
+# This is the ONLY teardown target, and it is a full cleanup - pgdata included, so the next `make up`
+# starts from a clean database. HARBOR_TEARDOWN is what extends that to Harbor: nothing under
+# harbor.yml's `data_volume` is a podman volume (it is a HOST directory, bind-mounted), so the prune
+# below cannot reach it and merely stopping the containers left the whole registry behind - not only
+# the cached blobs but Harbor's own Postgres database, which is why a torn-down platform came back up
+# still showing the previous deployment's projects.
+#
+# The cost is real, and is why the opt-out exists: the pull-through cache is gigabytes a fresh
+# `make up` then re-pulls from the internet, and it is the registry integration's main payoff. So
+# `make down KEEP_CACHE=1` stops Harbor instead of reaping it, and `make harbor-down` still only ever
+# stops it. Neither is ever allowed to fail a teardown - see scripts/harbor.sh.
+HARBOR_TEARDOWN := $(if $(KEEP_CACHE),stop,reap)
+
+down: _clusters-down ## Full cleanup: delete clusters, stop everything incl. Harbor, prune every volume AND Harbor's data (KEEP_CACHE=1 keeps its image cache)
+	$(COMPOSE) $(REAL) $(HARBOR) down
+	@./scripts/harbor.sh $(HARBOR_TEARDOWN)
 	podman volume prune -f
 
 logs:
@@ -123,9 +168,6 @@ rebuild: ## Rebuild images and recreate the stack
 
 psql: ## psql shell into the postgres container
 	$(COMPOSE) $(FAKE) exec postgres psql -U kaas -d kaas
-
-nuke: _clusters-down ## Delete running clusters, then remove containers AND the DB volume
-	$(COMPOSE) $(REAL) down -v
 
 # Best-effort: ask the running API to delete all clusters and wait for their VMs to be torn
 # down BEFORE the containers are removed - otherwise stopping the worker mid-destroy orphans
@@ -165,15 +207,16 @@ kubeconfig: ## Fetch a cluster's admin kubeconfig to /tmp/kubeconfig (needs CLUS
 up-scale: export WEB := $(WEB)
 up-scale: export API := $(API)
 up-scale: export WORKER := $(WORKER)
-up-scale: ## Build + start the scaled stack (override counts: make up-scale WEB=3 API=3 WORKER=4)
-	$(COMPOSE) $(SCALE) up -d --build
+up-scale: harbor-ensure ## Build + start the scaled stack (override counts: make up-scale WEB=3 API=3 WORKER=4)
+	$(COMPOSE) $(SCALE) $(HARBOR) up -d --build
 	@echo ""
 	@echo "  Scaled up: web=$(WEB) api=$(API) worker=$(WORKER) (+ 2 exec agents, 1 postgres)."
 	@echo "  Portal at http://localhost:8080, API on :8081 - both via the lb container."
 	@echo "  Watch it: make logs-scale   Tear down: make down-scale"
 
-down-scale: _clusters-down ## Delete clusters, then stop + remove the scaled stack (keeps pgdata)
-	$(COMPOSE) $(SCALE) down
+down-scale: _clusters-down ## Delete clusters, then stop + remove the scaled stack, incl. Harbor, and prune volumes + Harbor's data (see `down`)
+	$(COMPOSE) $(SCALE) $(HARBOR) down
+	@./scripts/harbor.sh $(HARBOR_TEARDOWN)
 	podman volume prune -f
 
 logs-scale:
@@ -254,14 +297,32 @@ chart-package: ## Package the Helm chart into dist/
 
 # ---- Containers: FAKE mode (no KVM) ----------------------------------------------------
 
-up-fake: ## Build + start the fake-mode stack (web + api + postgres, no worker)
-	$(COMPOSE) $(FAKE) up -d --build
+up-fake: harbor-ensure ## Build + start the fake-mode stack (web + api + postgres, no worker, + Harbor when configured)
+	$(COMPOSE) $(FAKE) $(HARBOR) up -d --build
 	@echo ""
 	@echo "  Portal ready at http://localhost:8080 (API direct on :8081; fake providers)."
 	@echo "  Watch it: make logs-fake   Tear down: make down-fake"
 
-down-fake: _clusters-down ## Delete clusters, then stop + remove the fake-mode containers (keeps pgdata)
-	$(COMPOSE) $(FAKE) down
+harbor-up: ## Bring Harbor itself up (needs deploy/harbor/harbor.yml - see the .example)
+	./scripts/harbor.sh up
+
+# The prerequisite every bring-up runs. A no-op when Harbor is not configured or already running, so
+# it costs nothing on the common path and never blocks the platform from starting.
+harbor-ensure:
+	@./scripts/harbor.sh ensure
+
+harbor-down: ## Stop Harbor, keeping its images
+	./scripts/harbor.sh down
+
+harbor-purge: ## Stop Harbor and DELETE its data - every cached image and its database
+	./scripts/harbor.sh purge
+
+registry-warm: ## Pre-pull the default bundle's images through the registry cache (see the script)
+	./scripts/registry-warm.sh
+
+down-fake: _clusters-down ## Delete clusters, then stop + remove the fake-mode containers, incl. Harbor, and prune volumes + Harbor's data (see `down`)
+	$(COMPOSE) $(FAKE) $(HARBOR) down
+	@./scripts/harbor.sh $(HARBOR_TEARDOWN)
 	podman volume prune -f
 
 logs-fake:

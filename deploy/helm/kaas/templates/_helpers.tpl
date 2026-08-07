@@ -222,6 +222,44 @@ production would mount a scoped token via secretKeyRef.
 - name: KAAS_VAULT_UI_URL
   value: {{ tpl .Values.vault.uiUrl . | quote }}
 {{- end }}
+{{/*
+Container image registry (internal/registry) - needed by both Deployments, with DIFFERENT
+credentials: the worker creates projects/robots/memberships with an admin account, the API only lists
+for the Registry page and should hold a read-only robot (registry.apiUsername/apiPassword). Left
+unset the API reuses the admin credential, which is what makes the portal's self-service password
+button work and is a documented widening.
+
+`host` is the value a cluster NODE uses - deliberately not `url`, which is a Service in the
+management cluster. It is baked into every image reference and every node's containerd config.
+*/}}
+- name: KAAS_REGISTRY
+  value: {{ .Values.registry.seam | quote }}
+{{- if .Values.registry.url }}
+- name: KAAS_REGISTRY_URL
+  value: {{ tpl .Values.registry.url . | quote }}
+{{- end }}
+{{- if .Values.registry.host }}
+- name: KAAS_REGISTRY_HOST
+  value: {{ tpl .Values.registry.host . | quote }}
+{{- end }}
+{{- if .Values.registry.uiUrl }}
+- name: KAAS_REGISTRY_UI_URL
+  value: {{ tpl .Values.registry.uiUrl . | quote }}
+{{- end }}
+- name: KAAS_REGISTRY_PROJECT_PREFIX
+  value: {{ .Values.registry.projectPrefix | quote }}
+- name: KAAS_REGISTRY_MIRROR
+  value: {{ .Values.registry.mirror | ternary "1" "0" | quote }}
+- name: KAAS_REGISTRY_INSECURE
+  value: {{ .Values.registry.insecure | ternary "1" "0" | quote }}
+- name: KAAS_REGISTRY_RETAIN_PROJECT
+  value: {{ .Values.registry.retainProject | ternary "1" "0" | quote }}
+- name: KAAS_REGISTRY_PROJECT_QUOTA_GB
+  value: {{ .Values.registry.projectQuotaGB | quote }}
+{{- if .Values.registry.caCert }}
+- name: KAAS_REGISTRY_CA_FILE
+  value: /etc/kaas/registry-ca.crt
+{{- end }}
 {{- if has "vsphere" .Values.infra.providers }}
 - name: KAAS_VSPHERE_NETWORK
   value: {{ .Values.infra.vsphere.network.name | quote }}

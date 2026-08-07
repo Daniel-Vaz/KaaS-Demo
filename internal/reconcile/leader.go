@@ -66,7 +66,7 @@ func (o *River) leaderLoop(ctx context.Context) {
 
 // runSingletons runs the leader-only loops until ctx is cancelled (shutdown, or a lost lease).
 func (o *River) runSingletons(ctx context.Context) {
-	done := make(chan struct{}, 4)
+	done := make(chan struct{}, 5)
 	run := func(fn func(context.Context)) {
 		go func() {
 			fn(ctx)
@@ -77,7 +77,8 @@ func (o *River) runSingletons(ctx context.Context) {
 	run(o.metricsLoop)
 	run(o.healthLoop)
 	run(o.vaultSyncLoop)
-	for range 4 {
+	run(o.registrySyncLoop)
+	for range 5 {
 		<-done
 	}
 }
@@ -97,6 +98,30 @@ func (o *River) vaultSyncLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			o.rec.SyncVaultAccess(ctx)
+		}
+	}
+}
+
+// registrySyncLoop ensures the platform registry objects once, then converges the per-user project
+// memberships on a ticker. Leader-only for the same reason as the Vault sweep: it reads the whole
+// users/groups/clusters set and rewrites the registry's memberships, so running it once per replica
+// would be pure churn.
+//
+// Note what is NOT in here: the node-facing trust and mirror configuration. That is derived from
+// settings alone and applied by whichever replica runs a playbook, so it deliberately does not
+// depend on this loop having run - a cluster brought up by a non-leader worker is still configured
+// to pull through the cache.
+func (o *River) registrySyncLoop(ctx context.Context) {
+	o.rec.EnsureRegistryPlatform(ctx)
+	o.rec.SyncRegistryAccess(ctx)
+	t := time.NewTicker(registrySyncInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			o.rec.SyncRegistryAccess(ctx)
 		}
 	}
 }

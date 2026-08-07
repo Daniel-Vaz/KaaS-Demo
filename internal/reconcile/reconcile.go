@@ -24,6 +24,7 @@ import (
 	"github.com/Daniel-Vaz/KaaS-demo/internal/metrics"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/monitoring"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/provision"
+	"github.com/Daniel-Vaz/KaaS-demo/internal/registry"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/secrets"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/store"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/vault"
@@ -47,7 +48,12 @@ type Reconciler struct {
 	// (reconcileVaultWiring / releaseVault) and converges the per-user/-group access bindings under
 	// the leader lease (SyncAccess). Nil is "this deployment runs no Vault" - every call site is
 	// guarded, so hand-built test reconcilers need not set it. See internal/vault.
-	Vault    vault.Manager
+	Vault vault.Manager
+	// Registry provisions each cluster's image-registry project + push/pull robot
+	// (reconcileRegistryWiring / releaseRegistry) and converges the per-user project memberships
+	// under the leader lease (SyncAccess). Nil is "this deployment runs no registry" - every call
+	// site is guarded, so hand-built test reconcilers need not set it. See internal/registry.
+	Registry registry.Manager
 	Metrics  metrics.Collector // live resource-usage telemetry (read-only seam)
 	Health   health.Checker    // live cluster-health checks (read-only seam)
 	Catalog  *catalog.Catalog  // resolves bundles + diffs them for the upgrade dispatch
@@ -121,6 +127,12 @@ const healthInterval = 20 * time.Second
 // is what eventually reflects it in Vault - a slow ticker is fine (access changes are rare, and the
 // portal's own authorization is already correct the instant the edit lands).
 const vaultSyncInterval = 30 * time.Second
+
+// registrySyncInterval is the same idea for the image registry's project memberships, and slower:
+// each sweep reads every project's member list, which is a round-trip per project rather than a
+// single write, and losing pull access a minute later than losing portal access is not a meaningful
+// exposure - the portal is already the authoritative gate on everything a user reaches through it.
+const registrySyncInterval = 60 * time.Second
 
 // CollectMetrics samples live per-node resource usage from every Ready cluster whose
 // metrics-server add-on is installed, and upserts the latest snapshot into the store. It is
@@ -666,6 +678,12 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c *domain.Cluster) error 
 		if err := r.reconcileVaultWiring(ctx, c); err != nil {
 			return err
 		}
+		// And the cluster's own image-registry project + pull credential (see reconcileRegistryWiring).
+		// Unlike the Vault wiring this gates on no add-on: nothing has to be installed for a cluster to
+		// have somewhere to push.
+		if err := r.reconcileRegistryWiring(ctx, c); err != nil {
+			return err
+		}
 		// And with Longhorn up, hand it any disk beyond each worker's platform one (usually none -
 		// see reconcileStorageWiring).
 		if err := r.reconcileStorageWiring(ctx, c); err != nil {
@@ -831,6 +849,10 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c *domain.Cluster) error 
 		if err := r.reconcileVaultWiring(ctx, c); err != nil {
 			return err
 		}
+		// A cluster that predates the registry integration gets its project on its next update.
+		if err := r.reconcileRegistryWiring(ctx, c); err != nil {
+			return err
+		}
 		// A disk attached (or removed) by this very update has to reach Longhorn, which is why the
 		// storage marker is a fingerprint rather than a latch.
 		if err := r.reconcileStorageWiring(ctx, c); err != nil {
@@ -858,6 +880,11 @@ func (r *Reconciler) reconcileOne(ctx context.Context, c *domain.Cluster) error 
 		}
 		// Tear down the cluster's Vault path before the infrastructure goes away - see releaseVault.
 		if err := r.releaseVault(ctx, c); err != nil {
+			return err
+		}
+		// And its registry project, for the sharper version of the same reason: the project is named
+		// after the cluster, and the name is reusable - see releaseRegistry.
+		if err := r.releaseRegistry(ctx, c); err != nil {
 			return err
 		}
 		if err := r.prov(c).DestroyCluster(ctx, c.ID); err != nil {

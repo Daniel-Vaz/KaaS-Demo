@@ -26,6 +26,7 @@ light/dark theme toggle, and your account menu.
 | **Workloads** | Browse and scale the live workloads inside a cluster. [→ Workloads](workloads.md) |
 | **Storage** | PersistentVolumeClaims and StorageClasses. [→ Storage](storage.md) |
 | **Secrets** | The Vault-backed per-cluster secret store. [→ Secrets](secrets.md) |
+| **Registry** | Your cluster's container images, and where to push them. [→ Registry](registry.md) |
 | **Networking** | Services, Gateways, Routes, and every exposed app. [→ Networking](networking.md) |
 | **Monitoring** | Prometheus/Grafana dashboards, rendered natively. [→ Monitoring](monitoring.md) |
 | **Security** | Trivy vulnerability, misconfig, secret, and RBAC reports. [→ Security](security.md) |

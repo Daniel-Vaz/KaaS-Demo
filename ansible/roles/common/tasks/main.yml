@@ -77,6 +77,15 @@
     enabled: true
     state: restarted
 
+# Registry trust + pull-through mirrors, BEFORE anything pulls an image. This role runs on every
+# path that brings a node into service (bootstrap, worker join, control-plane join, rejoin, restore),
+# which is exactly the coverage the registry mirror needs - a node that missed it on any one of those
+# paths would pull from the internet forever. It is a hard no-op when no registry is configured.
+# See ansible/roles/registry_trust and internal/registry.NodeTrust.
+- name: Configure the platform image registry (trust + pull-through mirrors)
+  ansible.builtin.include_role:
+    name: registry_trust
+
 - name: Add Kubernetes apt signing key
   ansible.builtin.get_url:
     url: "https://pkgs.k8s.io/core:/stable:/v{{ k8s_minor }}/deb/Release.key"

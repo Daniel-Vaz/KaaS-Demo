@@ -57,6 +57,11 @@ const (
 	SecretKubeconfigViewer SecretKind = "kubeconfig_viewer"
 	SecretJoinToken        SecretKind = "join_token"
 	SecretSSHKey           SecretKind = "ssh_key"
+	// SecretRegistryPull is the cluster's image-registry robot credential (a JSON
+	// {username,secret,expires}), minted once by reconcileRegistryWiring. It is sealed like every
+	// other per-cluster secret because it is a push credential for the cluster's own project - a
+	// tenant's images, not merely the ability to pull public ones.
+	SecretRegistryPull SecretKind = "registry_pull"
 )
 
 // GroupRole is a user's role within a single group - a coarse read/write RBAC over that group's
@@ -423,6 +428,26 @@ type Cluster struct {
 	// they change as memberships change and are converged separately by the leader-elected
 	// vault.Manager.SyncAccess sweep.
 	VaultWired bool `json:"vault_wired,omitempty"`
+
+	// RegistryWired records that the cluster's image-registry project + push/pull robot have been
+	// provisioned and its in-cluster pull Secret applied (see reconcileRegistryWiring). Another
+	// decided-once latch, like GatewayWired/DNSWired/VaultWired: a project does not move, and the
+	// per-USER memberships that change with group edits are converged separately by the
+	// leader-elected registry.Manager.SyncAccess sweep. Dropped on delete by releaseRegistry, which
+	// runs before the infrastructure is destroyed.
+	//
+	// It says nothing about a node's ability to PULL: registry trust and the pull-through mirrors are
+	// applied by Ansible on the bootstrap path, because a node's first image pull happens long before
+	// a cluster is Ready. See internal/registry.NodeTrust.
+	RegistryWired bool `json:"registry_wired,omitempty"`
+
+	// RegistryRobotNotAfter is when the cluster's registry robot credential expires. Observed state,
+	// stamped when the robot is minted: it exists so a future rotation sweep has a due-date to read,
+	// the same shape as CertNotAfter driving PhaseRenewingCerts. Nothing acts on it yet - a robot is
+	// minted with a year's life - and it is deliberately a scalar on the row rather than a re-derived
+	// value, because the credential itself is sealed and re-reading it to learn its expiry would mean
+	// decrypting a secret to answer a scheduling question.
+	RegistryRobotNotAfter *time.Time `json:"registry_robot_not_after,omitempty"`
 
 	// StorageWired records which set of node disks has been registered with Longhorn (see
 	// reconcileStorageWiring). Unlike GatewayWired/DNSWired this is a FINGERPRINT rather than a bool,

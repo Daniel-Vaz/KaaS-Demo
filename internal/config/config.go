@@ -89,6 +89,14 @@ type Manager interface {
 	// (see the external_secrets ansible role). Run only once the external-secrets add-on is installed
 	// (the reconciler gates on that). Idempotent (`kubectl apply`), so it re-runs cleanly on retries.
 	EnsureExternalSecrets(ctx context.Context, c *domain.Cluster) error
+	// EnsureRegistryPullSecret applies the in-cluster half of the image-registry integration: a
+	// dockerconfigjson Secret holding the cluster's own push/pull robot, so workloads can pull from
+	// (and CI can push to) the cluster's private project without anyone minting a credential by hand.
+	// Idempotent (`kubectl apply` of a generated Secret), so it re-runs cleanly on retries.
+	//
+	// It carries the credential as plain strings rather than a registry type on purpose: this seam is
+	// about running playbooks, and the only thing it needs to know is what to write.
+	EnsureRegistryPullSecret(ctx context.Context, c *domain.Cluster, username, secret string) error
 	// ClusterOIDC returns the cluster's service-account token ISSUER and its PUBLIC signing keys
 	// (PEM-encoded, from the cluster's /openid/v1/jwks), so the platform can configure Vault to
 	// validate the External Secrets Operator's ServiceAccount token OFFLINE - no Vault→cluster
@@ -246,6 +254,10 @@ func (Fake) EnsureCNIMetrics(_ context.Context, _ *domain.Cluster) error        
 func (Fake) EnsureControlPlaneMetrics(_ context.Context, _ *domain.Cluster) error { return nil }
 func (Fake) EnsureDefaultGateway(_ context.Context, _ *domain.Cluster) error      { return nil }
 func (Fake) EnsureExternalSecrets(_ context.Context, _ *domain.Cluster) error     { return nil }
+
+func (Fake) EnsureRegistryPullSecret(_ context.Context, _ *domain.Cluster, _, _ string) error {
+	return nil
+}
 
 func (Fake) ClusterOIDC(_ context.Context, _ *domain.Cluster) (string, []string, error) {
 	return "", nil, nil

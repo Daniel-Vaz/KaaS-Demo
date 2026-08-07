@@ -1,0 +1,18 @@
+---
+# Handlers, so a node whose registry configuration has not changed pays nothing: containerd is
+# restarted only when a file below it actually moved. That matters because this role runs on every
+# bootstrap, join, rejoin and restore.
+
+- name: Update CA trust
+  ansible.builtin.command: update-ca-certificates
+  changed_when: true
+  notify: Restart containerd
+
+- name: Restart containerd
+  # containerd re-reads certs.d per pull, but config.toml (config_path) only at start-up, and the
+  # system trust store is read by the process at start-up too - so a restart is the only way a
+  # freshly-configured node actually uses either. Safe here: this runs before kubeadm on a fresh node,
+  # and on a re-run it is a brief blip on a node whose kubelet retries.
+  ansible.builtin.systemd:
+    name: containerd
+    state: restarted

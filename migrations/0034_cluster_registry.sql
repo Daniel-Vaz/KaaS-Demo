@@ -1,0 +1,26 @@
+-- 0034_cluster_registry.sql - container image registry integration (internal/registry): every
+-- cluster owns a private project in the central registry (Harbor) plus a push/pull robot account,
+-- mirroring the per-cluster Vault subtree in 0033.
+--
+-- registry_wired is the observed-state marker recording that the project + robot have been
+-- provisioned and the in-cluster pull Secret applied (see reconcileRegistryWiring), so the idempotent
+-- provisioning is skipped once done - the same latch shape as gateway_wired/dns_wired/vault_wired. It
+-- is dropped on delete when releaseRegistry removes the project, which runs BEFORE the infrastructure
+-- is destroyed. Pre-existing rows default to false: the wiring fires on their next reconcile.
+--
+-- registry_robot_not_after is when the minted robot credential expires. Nothing acts on it yet (a
+-- robot is minted with a year's life); it exists so a rotation sweep can be added later as a
+-- time-driven due-scan over this column, exactly as cert_not_after drives certificate renewal. It is
+-- a column rather than a value re-read from the credential because the credential is sealed, and
+-- decrypting a secret to answer a scheduling question is the wrong shape.
+--
+-- Deliberately NOT here: anything about a node's ability to pull. Registry trust and the pull-through
+-- mirrors are node configuration applied by Ansible on the bootstrap path (the registry_trust role) -
+-- a node's first image pull happens long before a cluster is Ready, so it can carry no marker that
+-- only a Ready cluster would set.
+--
+-- Also not here: the per-USER project memberships. Like Vault's, they change as group memberships
+-- change and are converged by the leader-elected registry.Manager.SyncAccess sweep, which reads the
+-- users/groups/clusters tables directly and stores nothing of its own.
+ALTER TABLE clusters ADD COLUMN IF NOT EXISTS registry_wired BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE clusters ADD COLUMN IF NOT EXISTS registry_robot_not_after TIMESTAMPTZ;

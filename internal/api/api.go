@@ -160,6 +160,22 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /clusters/{id}/secrets/{namespace}/{name}/manifest", s.getSecretManifest)
 	mux.HandleFunc("GET /clusters/{id}/vault-session", s.getVaultSession)
 
+	// Registry page (internal/registry). PLATFORM-scoped, not per-cluster: there is one registry and
+	// it spans every cluster, so these sit beside /catalog rather than under /clusters/{id}. Reads are
+	// filtered server-side by the platform's own access model (see app.RegistryOverview) - the API
+	// holds one read-only credential, exactly like the Monitoring/Security/Audit seams.
+	//
+	// The repository path is a trailing wildcard because a repository name nests
+	// ("cilium/cilium"), so it is not one path segment.
+	mux.HandleFunc("GET /registry", s.getRegistry)
+	mux.HandleFunc("GET /registry/projects/{project}/repositories", s.listRegistryRepositories)
+	mux.HandleFunc("GET /registry/projects/{project}/artifacts/{repo...}", s.listRegistryArtifacts)
+	// Self-service only: it mints a credential for the CALLER, never for anyone else, and only on a
+	// deployment whose registry uses local accounts.
+	mux.HandleFunc("POST /registry/credentials", s.rotateRegistryPassword)
+	// One cluster's registry facts (project name, push prefix), for the cluster detail page.
+	mux.HandleFunc("GET /clusters/{id}/registry", s.getClusterRegistry)
+
 	// Monitoring page: the request-driven PromQL query seam (internal/monitoring). View-scoped.
 	mux.HandleFunc("GET /clusters/{id}/monitoring", s.getMonitoringTabs)
 	mux.HandleFunc("GET /clusters/{id}/monitoring/{tab}", s.getMonitoringTab)
@@ -1526,6 +1542,9 @@ func statusFor(err error) int {
 		return http.StatusUnauthorized
 	case errors.Is(err, app.ErrTooManyAttempts):
 		return http.StatusTooManyRequests
+	case errors.Is(err, app.ErrRegistryPasswordUnavailable):
+		// Well-formed request, wrong deployment mode - the same 409 shape as ErrClusterNotReady.
+		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError
 	}
@@ -1539,4 +1558,63 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeErr(w http.ResponseWriter, code int, err error) {
 	writeJSON(w, code, map[string]string{"error": err.Error()})
+}
+
+// --- Registry page (internal/registry) ----------------------------------------
+//
+// All reads are view-scoped and filtered server-side from the platform's own model: a user sees the
+// projects of clusters they own or share, plus the platform's public library and caches. A project
+// they cannot see is 404, never 403 - the same choice authorizeCluster makes, so the API never
+// confirms that another tenant's cluster exists.
+
+// getRegistry returns the registry's status and the actor's visible projects.
+func (s *Server) getRegistry(w http.ResponseWriter, r *http.Request) {
+	sum, err := s.app.RegistryOverview(r.Context(), actorFrom(r))
+	if err != nil {
+		writeErr(w, statusFor(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, sum)
+}
+
+// listRegistryRepositories lists one project's repositories.
+func (s *Server) listRegistryRepositories(w http.ResponseWriter, r *http.Request) {
+	repos, err := s.app.RegistryRepositories(r.Context(), actorFrom(r), r.PathValue("project"))
+	if err != nil {
+		writeErr(w, statusFor(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, repos)
+}
+
+// listRegistryArtifacts lists one repository's artifacts (tags, sizes, scan summary).
+func (s *Server) listRegistryArtifacts(w http.ResponseWriter, r *http.Request) {
+	arts, err := s.app.RegistryArtifacts(r.Context(), actorFrom(r),
+		r.PathValue("project"), r.PathValue("repo"))
+	if err != nil {
+		writeErr(w, statusFor(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, arts)
+}
+
+// rotateRegistryPassword generates the CALLER's registry password and returns it once. There is no
+// path parameter on purpose: the actor is the subject, so no request can ask for anyone else's.
+func (s *Server) rotateRegistryPassword(w http.ResponseWriter, r *http.Request) {
+	cred, err := s.app.RotateRegistryPassword(r.Context(), actorFrom(r))
+	if err != nil {
+		writeErr(w, statusFor(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cred)
+}
+
+// getClusterRegistry returns one cluster's registry project and push prefix.
+func (s *Server) getClusterRegistry(w http.ResponseWriter, r *http.Request) {
+	cr, err := s.app.ClusterRegistry(r.Context(), actorFrom(r), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, statusFor(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cr)
 }

@@ -47,7 +47,7 @@ import {
   IconNetwork,
   type Icon as TablerIcon,
 } from '@tabler/icons-react';
-import { useCluster, useCatalog, useUpgrades, useDeleteCluster, useUpgradeCluster, useOperations, useMetrics, useHealth } from '../lib/queries';
+import { useCluster, useCatalog, useUpgrades, useDeleteCluster, useUpgradeCluster, useOperations, useMetrics, useHealth, useClusterRegistry } from '../lib/queries';
 import { api } from '../lib/api';
 import { useClusterEvents } from '../lib/events';
 import { ClusterStatusBadge } from '../components/ClusterStatusBadge';
@@ -545,6 +545,9 @@ function FactTile({
 }
 
 function OverviewTab({ cluster, health }: { cluster: Cluster; health?: HealthSnapshot | null }) {
+  // Where this cluster's own images live (internal/registry). Cheap and rarely changes, so it does
+  // not poll; on a deployment with no registry it reports unconfigured and the row is hidden.
+  const { data: clusterRegistry } = useClusterRegistry(cluster.id);
   const endpoint = apiEndpoint(cluster);
   const isReady = clusterUsable(cluster);
   const provider = clusterProvider(cluster);
@@ -724,6 +727,19 @@ function OverviewTab({ cluster, health }: { cluster: Cluster; health?: HealthSna
                 {endpoint && (
                   <KV label="Endpoint">
                     <CopyValue value={endpoint} />
+                  </KV>
+                )}
+                {clusterRegistry?.configured && clusterRegistry.wired && (
+                  /* Where this cluster's own images live. The prefix is platform-minted, so it is
+                     shown rather than left to be guessed; the full push flow is on the Registry
+                     page. */
+                  <KV label="Image registry">
+                    <Group gap={6} wrap="nowrap">
+                      <CopyValue value={clusterRegistry.push_prefix} />
+                      <Anchor component={Link} to={`/registry?project=${clusterRegistry.project}`} size="xs">
+                        open
+                      </Anchor>
+                    </Group>
                   </KV>
                 )}
                 <Divider my={2} />

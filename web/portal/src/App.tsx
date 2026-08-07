@@ -9,6 +9,7 @@ import { Workloads } from './pages/Workloads';
 import { WorkloadDetail } from './pages/WorkloadDetail';
 import { Storage } from './pages/Storage';
 import { Secrets } from './pages/Secrets';
+import { Registry } from './pages/Registry';
 import { Networking } from './pages/Networking';
 import { Monitoring } from './pages/Monitoring';
 import { Security } from './pages/Security';
@@ -45,6 +46,7 @@ export function App() {
         <Route path="/workloads/:clusterId/:kind/:namespace/:name" element={<WorkloadDetail />} />
         <Route path="/storage" element={<Storage />} />
         <Route path="/secrets" element={<Secrets />} />
+        <Route path="/registry" element={<Registry />} />
         <Route path="/networking" element={<Networking />} />
         <Route path="/monitoring" element={<Monitoring />} />
         <Route path="/security" element={<Security />} />

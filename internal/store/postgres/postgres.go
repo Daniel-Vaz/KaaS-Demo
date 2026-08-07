@@ -88,7 +88,7 @@ const clusterCols = `id, name, size, network_cidr, pod_cidr, svc_cidr, bundle, o
 	dns_domain, apps_domain, dns_wired, storage_disk_gb, storage_wired,
 	etcd_db_bytes, etcd_db_in_use_bytes, etcd_quota_bytes, etcd_alarms, etcd_members,
 	etcd_observed_at, etcd_defragged_at, etcd_snapshot_at, repair, repair_observed_at,
-	vault_wired`
+	vault_wired, registry_wired, registry_robot_not_after`
 
 // etcdCols is the tail of clusterCols carrying domain.Cluster.Etcd, and etcdSet its assignment list
 // for the two UPDATE statements. Kept as constants next to etcdArgs/scanEtcd so the column order,
@@ -111,9 +111,10 @@ func updateArgs(c *domain.Cluster) []any {
 		c.CertNotAfter, c.LoadBalancerIP, c.GatewayWired, c.DNSDomain, c.AppsDomain, c.DNSWired,
 		c.StorageDiskGB, c.StorageWired,
 	}, append(etcdArgs(c), repairArgs(c)...)...)
-	// vault_wired is appended LAST (param $46, after etcdSet's $45) so the etcd/repair positional block
-	// stays put - the same "new columns go at the end" rule as the migration's ADD COLUMN.
-	return append(args, c.VaultWired)
+	// The integration columns are appended LAST (params $46-$48, after etcdSet's $45) so the
+	// etcd/repair positional block stays put - the same "new columns go at the end" rule as the
+	// migration's ADD COLUMN.
+	return append(args, c.VaultWired, c.RegistryWired, c.RegistryRobotNotAfter)
 }
 
 // etcdArgs flattens domain.Cluster.Etcd into its seven columns. A nil status (never observed) writes
@@ -172,11 +173,12 @@ func (s *Store) CreateCluster(c *domain.Cluster) error {
 		staticIPsJSON(c.StaticIPs), c.CertNotAfter, c.LoadBalancerIP, c.GatewayWired,
 		c.DNSDomain, c.AppsDomain, c.DNSWired, c.StorageDiskGB, c.StorageWired,
 	}, append(etcdArgs(c), repairArgs(c)...)...)
-	args = append(args, c.VaultWired) // last column, param $47 (see clusterCols / updateArgs)
+	// Last columns, params $47-$49 (see clusterCols / updateArgs).
+	args = append(args, c.VaultWired, c.RegistryWired, c.RegistryRobotNotAfter)
 	_, err = tx.Exec(ctx, `INSERT INTO clusters (`+clusterCols+`)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,
 			$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,
-			$44,$45,$46,$47)`, args...)
+			$44,$45,$46,$47,$48,$49)`, args...)
 	if err != nil {
 		return fmt.Errorf("postgres: insert cluster: %w", err)
 	}
@@ -201,7 +203,8 @@ func (s *Store) UpdateCluster(c *domain.Cluster) error {
 		network_cidr=$19, owner_id=$20, monitoring_wired=$21, provider=$22, network_name=$23,
 		ip_mode=$24, net_gateway=$25, net_dns=$26, static_ips=$27, cert_not_after=$28,
 		load_balancer_ip=$29, gateway_wired=$30, dns_domain=$31, apps_domain=$32,
-		dns_wired=$33, storage_disk_gb=$34, storage_wired=$35, `+etcdSet+`, vault_wired=$46 WHERE id=$1`,
+		dns_wired=$33, storage_disk_gb=$34, storage_wired=$35, `+etcdSet+`, vault_wired=$46,
+		registry_wired=$47, registry_robot_not_after=$48 WHERE id=$1`,
 		updateArgs(c)...)
 	if err != nil {
 		return fmt.Errorf("postgres: update cluster: %w", err)
@@ -248,7 +251,8 @@ func (s *Store) UpdateClusterUnlessSuperseded(c *domain.Cluster) error {
 		network_cidr=$19, owner_id=$20, monitoring_wired=$21, provider=$22, network_name=$23,
 		ip_mode=$24, net_gateway=$25, net_dns=$26, static_ips=$27, cert_not_after=$28,
 		load_balancer_ip=$29, gateway_wired=$30, dns_domain=$31, apps_domain=$32,
-		dns_wired=$33, storage_disk_gb=$34, storage_wired=$35, `+etcdSet+`, vault_wired=$46
+		dns_wired=$33, storage_disk_gb=$34, storage_wired=$35, `+etcdSet+`, vault_wired=$46,
+		registry_wired=$47, registry_robot_not_after=$48
 		WHERE id=$1 AND generation=$12`,
 		updateArgs(c)...)
 	if err != nil {
@@ -1193,7 +1197,8 @@ func scanCluster(row scanRow) (*domain.Cluster, error) {
 		&c.DNSDomain, &c.AppsDomain, &c.DNSWired, &c.StorageDiskGB, &c.StorageWired,
 		&etcd.DBBytes, &etcd.DBInUseBytes, &etcd.QuotaBytes, &etcd.Alarms, &etcd.Members,
 		&etcdObservedAt, &etcd.DefraggedAt,
-		&c.EtcdSnapshotAt, &repairBlob, &repairObservedAt, &c.VaultWired); err != nil {
+		&c.EtcdSnapshotAt, &repairBlob, &repairObservedAt, &c.VaultWired,
+		&c.RegistryWired, &c.RegistryRobotNotAfter); err != nil {
 		return nil, err
 	}
 	c.Phase = domain.Phase(phase)

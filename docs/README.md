@@ -43,6 +43,8 @@ Running KubeHarbor for others.
 - [**Directory authentication**](deploy/integrations/directory-auth.md) - Active Directory / LDAP.
 - [**Cluster DNS**](deploy/integrations/dns.md) - delegated zones and per-cluster records.
 - [**HashiCorp Vault**](deploy/integrations/vault.md) - the platform secret store.
+- [**Container image registry**](deploy/integrations/registry.md) - the platform's Harbor: a project
+  per cluster, plus pull-through caches.
 - [**NetBox IPAM**](deploy/integrations/netbox.md) - recording addresses on shared networks.
 
 ## 👤 Users - use the portal
@@ -58,6 +60,7 @@ Managing clusters through the web portal.
 - [**Monitoring**](portal/monitoring.md) · [**Security**](portal/security.md) - the observability and
   posture dashboards.
 - [**Secrets**](portal/secrets.md) - the Vault-backed per-cluster secret store.
+- [**Registry**](portal/registry.md) - your cluster's container images and where to push them.
 - [**Catalog & custom catalogs**](portal/catalog.md) - the add-on library and your own charts.
 - [**Account, teams & administration**](portal/account-and-admin.md) - profile, groups, quota, and the
   admin pages.
