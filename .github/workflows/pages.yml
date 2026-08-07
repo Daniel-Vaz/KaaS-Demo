@@ -61,7 +61,7 @@ jobs:
       - name: Build
         run: make demo-build VITE_BASE="${{ steps.pages.outputs.base_path }}/"
 
-      - uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: web/portal/dist
 
