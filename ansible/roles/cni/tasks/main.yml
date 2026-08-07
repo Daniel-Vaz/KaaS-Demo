@@ -88,7 +88,7 @@
   ansible.builtin.command: >
     /usr/local/bin/helm upgrade --install cilium cilium
     --repo https://helm.cilium.io
-    --version {{ cni_version | default('1.19.5') }}
+    --version {{ cni_version | default('1.20.0') }}
     --namespace kube-system
     --kubeconfig /etc/kubernetes/super-admin.conf
     --set ipam.mode=kubernetes
