@@ -13,12 +13,12 @@
     { "version": "1.36.2", "status": "supported" }
   ],
   "addons": [
-    { "name": "cilium", "type": "cni", "version": "1.19.5", "status": "supported", "repo": "https://helm.cilium.io", "chart": "cilium", "description": "eBPF-based CNI providing high-performance pod networking, network policy enforcement, and load balancing." },
+    { "name": "cilium", "type": "cni", "version": "1.20.0", "status": "supported", "repo": "https://helm.cilium.io", "chart": "cilium", "description": "eBPF-based CNI providing high-performance pod networking, network policy enforcement, and load balancing." },
     {
       "name": "kube-prometheus-stack",
       "description": "End-to-end cluster observability - Prometheus, Grafana, and Alertmanager wired together by the Prometheus Operator, with dashboards, recording rules, and alerts preconfigured. Powers the Monitoring page.",
       "type": "addon",
-      "version": "87.16.1",
+      "version": "88.2.0",
       "status": "supported",
       "repo": "https://prometheus-community.github.io/helm-charts",
       "chart": "kube-prometheus-stack",
@@ -63,7 +63,7 @@
       "name": "trivy-operator",
       "description": "Continuously scans in-cluster workloads and images for vulnerabilities, misconfigurations, exposed secrets, and RBAC risks, writing findings back as CRDs. Powers the Security page.",
       "type": "addon",
-      "version": "0.34.0",
+      "version": "0.35.0",
       "status": "supported",
       "repo": "https://aquasecurity.github.io/helm-charts",
       "chart": "trivy-operator",
@@ -121,7 +121,7 @@
       "name": "argocd",
       "description": "Declarative GitOps continuous delivery - syncs cluster state from Git repositories and continuously reconciles drift.",
       "type": "addon",
-      "version": "10.1.3",
+      "version": "10.3.0",
       "status": "supported",
       "repo": "https://argoproj.github.io/argo-helm",
       "chart": "argo-cd",
@@ -163,7 +163,7 @@
       "name": "opencost",
       "description": "Real-time cost monitoring and allocation for Kubernetes workloads, broken down by namespace, workload, and label.",
       "type": "addon",
-      "version": "2.5.26",
+      "version": "2.5.29",
       "status": "supported",
       "repo": "https://opencost.github.io/opencost-helm-chart",
       "chart": "opencost",
@@ -191,7 +191,7 @@
       "name": "external-secrets",
       "description": "Syncs secrets from HashiCorp Vault into native Kubernetes Secrets. Installed by default and wired to the platform's central Vault: the control plane provisions a per-cluster JWT auth role and a ClusterSecretStore, so an ExternalSecret referencing kaas/clusters/<id>/<namespace>/<name> materializes as a real Secret - with no static Vault credential in the cluster. Powers the Secrets page's 'View in Vault' link.",
       "type": "addon",
-      "version": "2.7.0",
+      "version": "2.8.0",
       "status": "supported",
       "repo": "https://charts.external-secrets.io",
       "chart": "external-secrets",
@@ -228,7 +228,7 @@
       "name": "cert-manager",
       "description": "Automates issuance and renewal of TLS certificates from Let's Encrypt, Vault, and other issuers. Installed by default; the platform provisions a self-signed ClusterIssuer and, when cluster DNS is configured, a wildcard certificate that terminates HTTPS on the default Envoy Gateway - so every route exposed under the cluster's apps domain is TLS-ready with nothing to configure.",
       "type": "addon",
-      "version": "1.21.0",
+      "version": "v1.21.1",
       "status": "supported",
       "repo": "https://charts.jetstack.io",
       "chart": "cert-manager",
@@ -313,7 +313,7 @@
       "os": "ubuntu-26.04",
       "kubernetes": "1.36.2",
       "cni": "cilium",
-      "addons": { "cilium": "1.19.5", "kube-prometheus-stack": "87.16.1", "metrics-server": "3.13.1", "trivy-operator": "0.34.0", "metallb": "0.16.1", "envoy-gateway": "v1.8.2", "external-dns": "1.21.1", "cert-manager": "1.21.0", "longhorn": "1.12.0", "external-secrets": "2.7.0" },
+      "addons": { "cilium": "1.20.0", "kube-prometheus-stack": "88.2.0", "metrics-server": "3.13.1", "trivy-operator": "0.35.0", "metallb": "0.16.1", "envoy-gateway": "v1.8.2", "external-dns": "1.21.1", "cert-manager": "v1.21.1", "longhorn": "1.12.0", "external-secrets": "2.8.0" },
       "supersedes": ""
     }
   ]
