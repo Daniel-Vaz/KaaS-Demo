@@ -208,7 +208,7 @@ jobs:
       # Ties the published digest to this workflow, this commit and this runner - keyless, no secret
       # to manage, and verifiable with `gh attestation verify`. It is what makes "pin by digest"
       # (docs/deploy/releasing.md) more than a convention.
-      - uses: actions/attest-build-provenance@v3
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ steps.tags.outputs.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
