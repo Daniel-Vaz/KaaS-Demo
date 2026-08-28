@@ -9,7 +9,7 @@ ARG VERSION=dev
 ARG COMMIT=unknown
 ARG DATE=unknown
 
-FROM docker.io/library/golang:1.26 AS build
+FROM docker.io/library/golang:1.27 AS build
 ARG VERSION
 ARG COMMIT
 ARG DATE
