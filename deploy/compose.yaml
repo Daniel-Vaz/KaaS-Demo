@@ -200,7 +200,7 @@ services:
   # The platform creates its own `kaas` KV mount and per-cluster paths/policies on top. On the kaas
   # network as `vault:8200`; the UI is published on the host by compose.ports.yaml.
   vault:
-    image: docker.io/hashicorp/vault:2.0
+    image: docker.io/hashicorp/vault:2.1
     entrypoint: /usr/local/bin/kaas-vault-entrypoint.sh
     environment:
       # The entrypoint mints a token with this exact ID after init, so the platform's configuration is
