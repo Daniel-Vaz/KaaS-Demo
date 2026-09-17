@@ -4,42 +4,55 @@ updates:
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    groups:
+      # river, riverdriver/riverpgxv5 and rivertype are released together and must move together;
+      # ungrouped, Dependabot opens one overlapping PR per module.
+      river:
+        patterns:
+          - "github.com/riverqueue/river*"
 
   # Web portal (React + TypeScript + Vite)
   - package-ecosystem: "npm"
     directory: "/web/portal"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    groups:
+      # Every @mantine package pins its siblings as exact peer dependencies, so they must share one
+      # version. --legacy-peer-deps hides a mismatch from npm ci, so one-package-per-PR bumps would
+      # pass CI while leaving the portal on mixed Mantine releases.
+      mantine:
+        patterns:
+          - "@mantine/*"
 
   # OpenTofu provider version constraints.
   - package-ecosystem: "terraform"
     directory: "/infra/libvirt"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
   - package-ecosystem: "terraform"
     directory: "/infra/vsphere"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
   - package-ecosystem: "terraform"
     directory: "/infra/proxmox"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
 
   # Base images in the images this repo builds (deploy/Containerfile.*).
   - package-ecosystem: "docker"
     directory: "/deploy"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
 
   # Container base images pinned in deploy/compose*.yaml.
   - package-ecosystem: "docker-compose"
     directory: "/deploy"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
 
   # GitHub Actions workflows.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
