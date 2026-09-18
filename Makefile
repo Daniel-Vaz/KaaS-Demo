@@ -138,7 +138,7 @@ help: ## Show this help
 	@echo "  Local dev (no containers):"
 	@echo "    make build test vet | run-api | run-worker | tidy | clean"
 	@echo "    make golden-image [OS_NAME=.. K8S_VERSION=.. BASE_IMAGE_URL=..]  Bake one golden image"
-	@echo "    make golden-images   Bake the shipped catalog image (ubuntu-26.04 k8s 1.36.2; kvm + vSphere + Proxmox)"
+	@echo "    make golden-images   Bake the shipped catalog image (ubuntu-26.04 k8s 1.37.0; kvm + vSphere + Proxmox)"
 	@echo "    make golden-image-vsphere [OS_NAME=.. K8S_VERSION=..]  Bake the vSphere VM template"
 	@echo "    make golden-image-proxmox [OS_NAME=.. K8S_VERSION=..]  Bake the Proxmox VM template"
 
@@ -430,7 +430,7 @@ run-worker:
 # images land in GOLDEN_DEST (libvirt's default pool dir), which is the KAAS_IMAGE_DIR the
 # provisioner reads. Override GOLDEN_DEST to write elsewhere (e.g. packer/output for local runs).
 OS_NAME        ?= ubuntu-26.04
-K8S_VERSION    ?= 1.36.2
+K8S_VERSION    ?= 1.37.0
 BASE_IMAGE_URL ?= https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-amd64.img
 GOLDEN_DEST    ?= /var/lib/libvirt/images
 IMAGE_NAME      = $(OS_NAME)-k8s-$(K8S_VERSION).qcow2
@@ -470,14 +470,14 @@ golden-image:
 # (source .env first) - mirroring KAAS_INFRA_PROVIDERS, vSphere is opt-in, so its absence doesn't
 # fail the KVM-only (default) path. The KVM image is the head/default new clusters boot.
 golden-images:
-	$(MAKE) golden-image OS_NAME=ubuntu-26.04 K8S_VERSION=1.36.2 BASE_IMAGE_URL='https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-amd64.img'
+	$(MAKE) golden-image OS_NAME=ubuntu-26.04 K8S_VERSION=1.37.0 BASE_IMAGE_URL='https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-amd64.img'
 	@if [ -n "$$KAAS_VSPHERE_FOLDER" ]; then \
-	   $(MAKE) golden-image-vsphere OS_NAME=ubuntu-26.04 K8S_VERSION=1.36.2; \
+	   $(MAKE) golden-image-vsphere OS_NAME=ubuntu-26.04 K8S_VERSION=1.37.0; \
 	 else \
 	   echo "golden-images: KAAS_VSPHERE_* not set - skipping the vSphere template (source .env and re-run, or use 'make golden-image-vsphere' directly)"; \
 	 fi
 	@if [ -n "$$KAAS_PROXMOX_ENDPOINT" ]; then \
-	   $(MAKE) golden-image-proxmox OS_NAME=ubuntu-26.04 K8S_VERSION=1.36.2; \
+	   $(MAKE) golden-image-proxmox OS_NAME=ubuntu-26.04 K8S_VERSION=1.37.0; \
 	 else \
 	   echo "golden-images: KAAS_PROXMOX_* not set - skipping the Proxmox template (source .env and re-run, or use 'make golden-image-proxmox' directly)"; \
 	 fi

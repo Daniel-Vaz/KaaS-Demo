@@ -91,7 +91,7 @@ essentials for local KVM:
 ```bash
 KAAS_SECRET_KEY=<a long, stable, random string>        # so encrypted secrets survive restarts
 KAAS_IMAGE_DIR=/var/lib/libvirt/images                 # per-(OS,k8s) golden images
-KAAS_BASE_IMAGE=/var/lib/libvirt/images/ubuntu-26.04-k8s-1.36.2.qcow2   # fallback single image
+KAAS_BASE_IMAGE=/var/lib/libvirt/images/ubuntu-26.04-k8s-1.37.0.qcow2   # fallback single image
 KAAS_SSH_PUBLIC_KEY=ssh-ed25519 AAAA... kaas           # literal key contents, injected via cloud-init
 KAAS_SSH_PRIVATE_KEY_FILE=/abs/path/to/your/private/key   # mounted read-only into the worker
 ```

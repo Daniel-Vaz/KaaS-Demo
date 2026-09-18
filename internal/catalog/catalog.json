@@ -6,19 +6,20 @@
       "release": "26.04",
       "status": "supported",
       "baseImageURL": "https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-amd64.img",
-      "goldenImage": "ubuntu-26.04-k8s-1.36.2.qcow2"
+      "goldenImage": "ubuntu-26.04-k8s-1.37.0.qcow2"
     }
   ],
   "kubernetes": [
-    { "version": "1.36.2", "status": "supported" }
+    { "version": "1.36.2", "status": "supported" },
+    { "version": "1.37.0", "status": "supported" }
   ],
   "addons": [
-    { "name": "cilium", "type": "cni", "version": "1.20.0", "status": "supported", "repo": "https://helm.cilium.io", "chart": "cilium", "description": "eBPF-based CNI providing high-performance pod networking, network policy enforcement, and load balancing." },
+    { "name": "cilium", "type": "cni", "version": "1.20.2", "status": "supported", "repo": "https://helm.cilium.io", "chart": "cilium", "description": "eBPF-based CNI providing high-performance pod networking, network policy enforcement, and load balancing." },
     {
       "name": "kube-prometheus-stack",
       "description": "End-to-end cluster observability - Prometheus, Grafana, and Alertmanager wired together by the Prometheus Operator, with dashboards, recording rules, and alerts preconfigured. Powers the Monitoring page.",
       "type": "addon",
-      "version": "88.2.0",
+      "version": "91.4.1",
       "status": "supported",
       "repo": "https://prometheus-community.github.io/helm-charts",
       "chart": "kube-prometheus-stack",
@@ -58,12 +59,12 @@
         "alertmanager.alertmanagerSpec.externalUrl": "http://localhost/api/clusters/{{.ClusterID}}/proxy/alertmanager"
       }
     },
-    { "name": "metrics-server", "type": "addon", "version": "3.13.1", "status": "supported", "repo": "https://kubernetes-sigs.github.io/metrics-server", "chart": "metrics-server", "description": "Cluster-wide resource metrics (CPU/memory) that power `kubectl top` and the Horizontal Pod Autoscaler.", "values": { "args[0]": "--kubelet-insecure-tls", "metrics.enabled": "true", "serviceMonitor.enabled": "true" } },
+    { "name": "metrics-server", "type": "addon", "version": "3.14.0", "status": "supported", "repo": "https://kubernetes-sigs.github.io/metrics-server", "chart": "metrics-server", "description": "Cluster-wide resource metrics (CPU/memory) that power `kubectl top` and the Horizontal Pod Autoscaler.", "values": { "args[0]": "--kubelet-insecure-tls", "metrics.enabled": "true", "serviceMonitor.enabled": "true" } },
     {
       "name": "trivy-operator",
       "description": "Continuously scans in-cluster workloads and images for vulnerabilities, misconfigurations, exposed secrets, and RBAC risks, writing findings back as CRDs. Powers the Security page.",
       "type": "addon",
-      "version": "0.35.0",
+      "version": "0.36.0",
       "status": "supported",
       "repo": "https://aquasecurity.github.io/helm-charts",
       "chart": "trivy-operator",
@@ -105,7 +106,7 @@
       "name": "envoy-gateway",
       "description": "Kubernetes Gateway API implementation built on Envoy Proxy for managing ingress and L7 traffic routing. Installed by default as the cluster's Gateway API; the platform provisions its GatewayClass and a default Gateway on the reserved MetalLB address.",
       "type": "addon",
-      "version": "v1.8.2",
+      "version": "v1.9.1",
       "status": "supported",
       "repo": "",
       "chart": "oci://docker.io/envoyproxy/gateway-helm",
@@ -121,7 +122,7 @@
       "name": "argocd",
       "description": "Declarative GitOps continuous delivery - syncs cluster state from Git repositories and continuously reconciles drift.",
       "type": "addon",
-      "version": "10.3.0",
+      "version": "10.9.2",
       "status": "supported",
       "repo": "https://argoproj.github.io/argo-helm",
       "chart": "argo-cd",
@@ -146,7 +147,7 @@
       "name": "kyverno",
       "description": "Kubernetes-native policy engine that validates, mutates, and generates resources to enforce security and governance rules.",
       "type": "addon",
-      "version": "3.8.2",
+      "version": "3.9.1",
       "status": "supported",
       "repo": "https://kyverno.github.io/kyverno",
       "chart": "kyverno",
@@ -163,7 +164,7 @@
       "name": "opencost",
       "description": "Real-time cost monitoring and allocation for Kubernetes workloads, broken down by namespace, workload, and label.",
       "type": "addon",
-      "version": "2.5.29",
+      "version": "2.5.31",
       "status": "supported",
       "repo": "https://opencost.github.io/opencost-helm-chart",
       "chart": "opencost",
@@ -178,7 +179,7 @@
       "name": "kepler",
       "description": "Uses eBPF and ML models to estimate per-pod energy consumption and export it as Prometheus metrics for sustainability reporting.",
       "type": "addon",
-      "version": "0.6.1",
+      "version": "0.6.2",
       "status": "supported",
       "repo": "https://sustainable-computing-io.github.io/kepler-helm-chart",
       "chart": "kepler",
@@ -191,7 +192,7 @@
       "name": "external-secrets",
       "description": "Syncs secrets from HashiCorp Vault into native Kubernetes Secrets. Installed by default and wired to the platform's central Vault: the control plane provisions a per-cluster JWT auth role and a ClusterSecretStore, so an ExternalSecret referencing kaas/clusters/<id>/<namespace>/<name> materializes as a real Secret - with no static Vault credential in the cluster. Powers the Secrets page's 'View in Vault' link.",
       "type": "addon",
-      "version": "2.8.0",
+      "version": "2.10.0",
       "status": "supported",
       "repo": "https://charts.external-secrets.io",
       "chart": "external-secrets",
@@ -211,7 +212,7 @@
       "name": "keycloak",
       "description": "Open-source identity and access management providing OIDC/SAML single sign-on for cluster and application services.",
       "type": "addon",
-      "version": "7.2.2",
+      "version": "7.3.2",
       "status": "supported",
       "repo": "https://codecentric.github.io/helm-charts",
       "chart": "keycloakx",
@@ -228,7 +229,7 @@
       "name": "cert-manager",
       "description": "Automates issuance and renewal of TLS certificates from Let's Encrypt, Vault, and other issuers. Installed by default; the platform provisions a self-signed ClusterIssuer and, when cluster DNS is configured, a wildcard certificate that terminates HTTPS on the default Envoy Gateway - so every route exposed under the cluster's apps domain is TLS-ready with nothing to configure.",
       "type": "addon",
-      "version": "v1.21.1",
+      "version": "v1.21.2",
       "status": "supported",
       "repo": "https://charts.jetstack.io",
       "chart": "cert-manager",
@@ -248,7 +249,7 @@
       "name": "external-dns",
       "description": "Publishes DNS records for the Services, Ingresses and HTTPRoutes deployed in this cluster, into the platform's own DNS under the cluster's domain. Installed by default; the platform points it at the site's DNS servers and confines it to <cluster>.<base domain>.",
       "type": "addon",
-      "version": "1.21.1",
+      "version": "1.22.0",
       "status": "supported",
       "repo": "https://kubernetes-sigs.github.io/external-dns/",
       "chart": "external-dns",
@@ -266,7 +267,7 @@
       "name": "longhorn",
       "description": "Cloud-native distributed block storage - the cluster's default StorageClass. Installed by default: every worker is born with an extra disk mounted at /var/lib/longhorn, which Longhorn registers as that node's storage, so a plain PersistentVolumeClaim gets a real replicated volume with nothing to configure. Attach more disks to a node to grow its share of the pool.",
       "type": "addon",
-      "version": "1.12.0",
+      "version": "1.12.1",
       "status": "supported",
       "repo": "https://charts.longhorn.io",
       "chart": "longhorn",
@@ -291,7 +292,7 @@
       "name": "openebs",
       "description": "Container-attached storage for Kubernetes - dynamically provisions LocalPV hostpath volumes backed by each node's own disk.",
       "type": "addon",
-      "version": "4.5.1",
+      "version": "4.6.1",
       "status": "supported",
       "repo": "https://openebs.github.io/openebs",
       "chart": "openebs",
@@ -315,6 +316,15 @@
       "cni": "cilium",
       "addons": { "cilium": "1.20.0", "kube-prometheus-stack": "88.2.0", "metrics-server": "3.13.1", "trivy-operator": "0.35.0", "metallb": "0.16.1", "envoy-gateway": "v1.8.2", "external-dns": "1.21.1", "cert-manager": "v1.21.1", "longhorn": "1.12.0", "external-secrets": "2.8.0" },
       "supersedes": ""
+    },
+    {
+      "name": "2026.2",
+      "status": "supported",
+      "os": "ubuntu-26.04",
+      "kubernetes": "1.37.0",
+      "cni": "cilium",
+      "addons": { "cilium": "1.20.2", "kube-prometheus-stack": "91.4.1", "metrics-server": "3.14.0", "trivy-operator": "0.36.0", "metallb": "0.16.1", "envoy-gateway": "v1.9.1", "external-dns": "1.22.0", "cert-manager": "v1.21.2", "longhorn": "1.12.1", "external-secrets": "2.10.0" },
+      "supersedes": "2026.1"
     }
   ]
 }

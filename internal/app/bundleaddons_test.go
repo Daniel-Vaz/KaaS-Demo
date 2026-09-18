@@ -5,8 +5,21 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Daniel-Vaz/KaaS-demo/internal/catalog"
 	"github.com/Daniel-Vaz/KaaS-demo/internal/domain"
 )
+
+// defaultBundle is the bundle a create request with no `bundle` lands on - the catalog's own
+// head, resolved exactly as CreateCluster does. Asking the catalog rather than naming a release
+// keeps these tests from breaking every time a new bundle supersedes the current one.
+func defaultBundle(t *testing.T, a *App) catalog.Bundle {
+	t.Helper()
+	b, ok := a.Catalog.LatestSupportedBundle()
+	if !ok {
+		t.Fatal("catalog has no supported head bundle")
+	}
+	return b
+}
 
 // bundleAddonNames is the add-ons a bundle ships minus its CNI - the set the create-time lock
 // governs (the CNI is installed at bootstrap, never as a selectable add-on).
@@ -36,7 +49,7 @@ func addonNames(c *domain.Cluster) []string {
 // the API-side half of the wizard's locked cards; the portal renders the lock, the server holds it.
 func TestBundleAddonsLockedAtCreateByDefault(t *testing.T) {
 	a, alice := newPoolApp(t)
-	bundled := bundleAddonNames(t, a, "2026.1")
+	bundled := bundleAddonNames(t, a, defaultBundle(t, a).Name)
 	if len(bundled) < 2 {
 		t.Fatalf("bundle carries %d add-ons, this test needs a few", len(bundled))
 	}
@@ -87,7 +100,8 @@ func TestBundleAddonsLockedAtCreateByDefault(t *testing.T) {
 func TestBundleAddonsOptionalAllowsDeselectionAtCreate(t *testing.T) {
 	a, alice := newPoolApp(t)
 	a.BundleAddonsOptional = true
-	bundled := bundleAddonNames(t, a, "2026.1")
+	b := defaultBundle(t, a)
+	bundled := bundleAddonNames(t, a, b.Name)
 
 	keep := bundled[0]
 	c, err := a.CreateCluster(alice, CreateRequest{Name: "lean", Size: "small", Addons: []string{keep}})
@@ -97,7 +111,6 @@ func TestBundleAddonsOptionalAllowsDeselectionAtCreate(t *testing.T) {
 	if got := addonNames(c); len(got) != 1 || got[0] != keep {
 		t.Fatalf("add-ons = %v, want only %q", got, keep)
 	}
-	b, _ := a.Catalog.Bundle("2026.1")
 	if c.Addons[0].Version != b.Addons[keep] {
 		t.Errorf("version = %q, want the bundle's pin %q", c.Addons[0].Version, b.Addons[keep])
 	}

@@ -26,7 +26,7 @@ Each provider needs the image in its own form, all built from the same `golden-i
 ## libvirt / KVM
 
 ```bash
-make golden-image        # the default: ubuntu-26.04 / k8s 1.36.2; skips if it already exists
+make golden-image        # the default: ubuntu-26.04 / k8s 1.37.0; skips if it already exists
 make golden-images       # the whole shipped set (kvm + vSphere + Proxmox, if configured)
 ```
 
@@ -52,7 +52,7 @@ for anything not present.
 ## VMware vSphere
 
 ```bash
-source .env && make golden-image-vsphere OS_NAME=ubuntu-26.04 K8S_VERSION=1.36.2
+source .env && make golden-image-vsphere OS_NAME=ubuntu-26.04 K8S_VERSION=1.37.0
 ```
 
 This uses the `vsphere-clone` Packer builder and marks the result as a vCenter template. Connection and
@@ -81,7 +81,7 @@ provider refuses to clone (and that would silently override cloud-init if satisf
 against an existing template with:
 
 ```bash
-source .env && go run ./cmd/vsphere-prep -template ubuntu-26.04-k8s-1.36.2
+source .env && go run ./cmd/vsphere-prep -template ubuntu-26.04-k8s-1.37.0
 ```
 
 See the [vSphere provider guide](providers/vsphere.md) for the datastore-latency caveat that matters
@@ -90,7 +90,7 @@ most here.
 ## Proxmox VE
 
 ```bash
-source .env && make golden-image-proxmox OS_NAME=ubuntu-26.04 K8S_VERSION=1.36.2
+source .env && make golden-image-proxmox OS_NAME=ubuntu-26.04 K8S_VERSION=1.37.0
 ```
 
 The `proxmox-clone` builder additionally installs and enables **`qemu-guest-agent`**, which is
@@ -124,5 +124,5 @@ Run Packer directly (PATH often shadows HashiCorp packer with cracklib's `/usr/s
 
 ```bash
 cd packer && /usr/bin/packer init . && /usr/bin/packer build \
-  -var os_name=ubuntu-26.04 -var k8s_version=1.36.2 -var output_name=ubuntu-26.04-k8s-1.36.2.qcow2 .
+  -var os_name=ubuntu-26.04 -var k8s_version=1.37.0 -var output_name=ubuntu-26.04-k8s-1.37.0.qcow2 .
 ```
