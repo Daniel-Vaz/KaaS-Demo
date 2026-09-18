@@ -99,6 +99,12 @@ source "proxmox-clone" "ubuntu-k8s" {
   communicator = "ssh"
   ssh_username = var.ssh_username
   ssh_timeout  = "20m"
+  # cloud-init re-addresses the NIC underneath the session Packer is holding (see the provisioners),
+  # and a session killed that way goes HALF-OPEN rather than closing: no RST ever arrives, so without
+  # these Packer blocks on a dead socket until ssh_timeout and the build looks hung. Keepalives make
+  # it notice, and the read/write timeout bounds how long "notice" takes.
+  ssh_keep_alive_interval = "10s"
+  ssh_read_write_timeout  = "3m"
 }
 
 build {
@@ -113,8 +119,27 @@ build {
   # udev-activated when the virtio-serial channel appears (which it does with `agent: enabled=1`), so
   # `enable` only prints a harmless "unit files have no installation config" warning and does nothing.
   provisioner "shell" {
+    # Packer's SSH comes up while cloud-init is still RUNNING, and cloud-init's last act is to apply
+    # the network config Proxmox generated - the static address and the eth0 rename described above.
+    # That drops this session underneath us, which Packer reports as "Script disconnected
+    # unexpectedly" (or, when the dead socket just goes quiet, as a build that hangs until its
+    # timeout). So expect the disconnect and reconnect afterwards rather than failing the build. The
+    # wait is bounded too: a cloud-init that never finishes must not hold the build open either.
+    expect_disconnect = true
+    # Poll rather than `cloud-init status --wait`: the wait prints nothing, so a session that dies
+    # mid-wait is indistinguishable from one that is simply working. A line every 10s keeps traffic
+    # on the connection, which is what lets the keepalives above surface a dead one promptly, and it
+    # makes the build log say what it is waiting for.
     inline = [
-      "sudo cloud-init status --wait || true",
+      "for i in $(seq 1 60); do s=$(cloud-init status 2>/dev/null || echo 'status: unknown'); echo \"waiting for cloud-init [$i]: $s\"; case \"$s\" in *done*|*disabled*|*error*) break;; esac; sleep 10; done",
+    ]
+  }
+
+  # Separate provisioner so it runs on the RECONNECTED session, on the address cloud-init settled on.
+  provisioner "shell" {
+    pause_before = "15s"
+    inline = [
+      "cloud-init status || true",
       "sudo apt-get update",
       "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-guest-agent",
     ]
@@ -130,10 +155,19 @@ build {
       "-e", "k8s_version=${var.k8s_version}",
       "-e", "k8s_minor=${local.k8s_minor}",
     ]
+    # Talk to the build VM directly instead of through Packer's SSH proxy adapter. The adapter is a
+    # localhost SSH server Packer stands up and points Ansible at; when one of its upstream sessions
+    # drops mid-task the client is left waiting on a socket nobody will answer, and the build hangs
+    # for as long as the job timeout allows (seen on the containerd install, which is the longest
+    # task in the play). Without it Ansible opens its own connection to the VM with the same
+    # ephemeral key, which is one moving part fewer and faster besides.
+    use_proxy = false
     ansible_env_vars = [
       "ANSIBLE_ROLES_PATH=${path.root}/../../ansible/roles",
       "ANSIBLE_HOST_KEY_CHECKING=False",
       "ANSIBLE_SSH_TRANSFER_METHOD=piped",
+      # Keepalives so a long silent task (apt) is not dropped by anything idle-timing the path.
+      "ANSIBLE_SSH_ARGS=-o ControlMaster=auto -o ControlPersist=60s -o ServerAliveInterval=15 -o ServerAliveCountMax=8",
     ]
   }
 

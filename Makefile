@@ -2,7 +2,7 @@
 	harbor-up harbor-ensure harbor-down harbor-purge registry-warm \
         up-scale down-scale logs-scale ps-scale helm-lint helm-template images images-push \
         catalog-check catalog-update version release-check bump chart-package \
-        _clusters-down build test vet run-api run-worker golden-image golden-image-vsphere golden-image-proxmox golden-images tidy clean \
+        _clusters-down build test vet run-api run-worker golden-image golden-image-vsphere golden-image-proxmox golden-image-proxmox-seed golden-images tidy clean \
         web-install web-dev web-build kubeconfig demo-wasm demo-build demo-dev
 
 # ---- Version and build stamping --------------------------------------------------------
@@ -141,6 +141,7 @@ help: ## Show this help
 	@echo "    make golden-images   Bake the shipped catalog image (ubuntu-26.04 k8s 1.37.0; kvm + vSphere + Proxmox)"
 	@echo "    make golden-image-vsphere [OS_NAME=.. K8S_VERSION=..]  Bake the vSphere VM template"
 	@echo "    make golden-image-proxmox [OS_NAME=.. K8S_VERSION=..]  Bake the Proxmox VM template"
+	@echo "    make golden-image-proxmox-seed   Rebake the Proxmox seed with net.ifnames=0 (one-off)"
 
 # ---- Containers: REAL KVM mode (default) -----------------------------------------------
 
@@ -546,6 +547,15 @@ golden-image-proxmox:
 	    -var seed_template='$(SEED_TEMPLATE)' \
 	    -var output_name=$(TEMPLATE_NAME) .) || exit 1; \
 	 echo "golden-image-proxmox: built template $(TEMPLATE_NAME) on node $$KAAS_PROXMOX_NODE"
+
+# Rebakes the Proxmox SEED template so it boots with net.ifnames=0 - without which a static build VM
+# strands itself the moment cloud-init renames its NIC, long before Ansible runs. One-off per OS; see
+# docs/deploy/golden-images.md. Outputs a NEW template, so swap the names yourself once it is built.
+golden-image-proxmox-seed: ## Rebake the Proxmox cloud-image seed with net.ifnames=0 (one-off)
+	@if [ -z "$$KAAS_PROXMOX_ENDPOINT" ]; then \
+	   echo "golden-image-proxmox-seed: KAAS_PROXMOX_* is not set - source your .env first" >&2; exit 1; \
+	 fi; \
+	 (cd packer/proxmox/seed && $(PACKER) init . && $(PACKER) build .)
 
 tidy:
 	go mod tidy

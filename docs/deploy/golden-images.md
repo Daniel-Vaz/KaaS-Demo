@@ -13,6 +13,11 @@ possible.
 The build runs the **same `common` Ansible role** used at cluster-create time, so the baked image and
 the runtime path can never drift - at create time `common` re-runs as a near no-op.
 
+Packer runs that role from the **build host**, so the host needs `ansible-core` **2.18 or newer** -
+the roles use `meta: end_role`, which older versions reject outright (`ERROR! invalid meta action
+requested: end_role`, after the first few tasks have already run). The worker image ships 2.20.x; a
+build host on an older distro ansible wants a venv on Python 3.11+ rather than the system package.
+
 ## The three artefacts
 
 Each provider needs the image in its own form, all built from the same `golden-image.yml` playbook:
@@ -101,6 +106,14 @@ at all. There's no post-build prep step - Proxmox has no inherited vApp config t
 
 - It **must carry `qemu-guest-agent`** (bake it in with `virt-customize` before importing) - the Packer
   plugin discovers the build VM's IP through the guest agent and hangs without it.
+- It **must boot with `net.ifnames=0`**. Proxmox's cloud-init writes a netplan keyed on the name
+  `eth0` (`match: macaddress` + `set-name: eth0`), but Ubuntu brings the NIC up as `ens18` and DHCP
+  leases it immediately, so the rename fails "[busy]" - a static address binds to an interface that
+  never exists, and the VM is stranded on the DHCP lease. The `common` role sets this, but only from
+  the moment it runs, so the BUILD VM strands itself first: SSH dies about two minutes in, and Packer
+  either fails with `dial tcp <build ip>:22: i/o timeout` or hangs on the half-open socket. Bake it
+  into the seed (`make golden-image-proxmox-seed` rebakes an existing one) so every clone has it from
+  boot.
 - Its **disk must be grown** past the ~3.5 GB stock image - containerd + kube* + the pre-pulled images
   don't fit. Resize to 20 GB; cloud-init's growpart expands the filesystem on every clone.
 

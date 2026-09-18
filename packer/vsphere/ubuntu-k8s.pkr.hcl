@@ -111,7 +111,20 @@ build {
     extra_arguments = [
       "-e", "k8s_version=${var.k8s_version}",
       "-e", "k8s_minor=${local.k8s_minor}",
+      # This builder authenticates with a PASSWORD (the cloud-init user above; vsphere-clone cannot
+      # inject a key into a template it did not create), so with use_proxy disabled Ansible needs the
+      # same credential. paramiko does password auth in-process - OpenSSH would need sshpass on the
+      # build host, a dependency the other two images do not have.
+      "-e", "ansible_connection=paramiko_ssh",
+      "-e", "ansible_password=packer",
     ]
+    # Talk to the build VM directly instead of through Packer's SSH proxy adapter. The adapter is a
+    # localhost SSH server Packer stands up and points Ansible at; when one of its upstream sessions
+    # drops mid-task the client is left waiting on a socket nobody will answer, and the build hangs
+    # for as long as the job timeout allows (seen on the containerd install, which is the longest
+    # task in the play). Without it Ansible opens its own connection to the VM - see the credential
+    # note below, since this builder has no SSH key to hand it.
+    use_proxy = false
     ansible_env_vars = [
       "ANSIBLE_ROLES_PATH=${path.root}/../../ansible/roles",
       "ANSIBLE_HOST_KEY_CHECKING=False",
