@@ -18,7 +18,7 @@ type: application
 # drifted appVersion makes `helm install` pull a platform nobody released. `make release-check`,
 # which CI runs on every PR, is what keeps them in step.
 version: 0.3.0
-appVersion: "0.3.0"
+appVersion: "0.3.1"
 
 keywords:
   - kubernetes-as-a-service
