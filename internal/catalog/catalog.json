@@ -75,7 +75,7 @@
         "trivy.resources.requests.cpu": "50m",
         "trivy.resources.requests.memory": "100Mi",
         "trivy.resources.limits.cpu": "500m",
-        "trivy.resources.limits.memory": "500Mi",
+        "trivy.resources.limits.memory": "1Gi",
         "operator.scannerReportTTL": "24h",
         "operator.scanJobsConcurrentLimit": "1",
         "nodeCollector.tolerations[0].operator": "Exists",
