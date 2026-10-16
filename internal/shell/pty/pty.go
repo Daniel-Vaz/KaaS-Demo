@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"syscall"
 
 	"github.com/Daniel-Vaz/KaaS-demo/internal/domain"
@@ -61,6 +62,11 @@ func New(shellBin, workDir, kubeProxyURL string, log *slog.Logger) *Runner {
 // terminal closes, or ctx is cancelled. rows/cols set the initial window size (the client resizes
 // again as soon as it measures its viewport).
 func (r *Runner) Serve(ctx context.Context, c *domain.Cluster, kc []byte, rows, cols uint16, term shell.Conn) error {
+	// The cluster ID arrives in the agent handshake and becomes a path component below; anything but
+	// a single plain name (a "../.." in particular) would escape WorkDir.
+	if !clusterIDPattern.MatchString(c.ID) {
+		return fmt.Errorf("pty: %q is not a valid cluster ID", c.ID)
+	}
 	if len(kc) == 0 {
 		return fmt.Errorf("pty: no kubeconfig for cluster %s yet - reconnect once it is fully Ready", c.Name)
 	}
@@ -209,6 +215,9 @@ complete -o default -F __start_kubectl k
 echo "KaaS shell - cluster %s (k8s v%s). kubectl is configured (tab-completion on); try: kubectl get nodes"
 `, kcPath, c.Name, c.Name, c.K8sVersion)
 }
+
+// clusterIDPattern accepts a cluster ID only as a single, dot-free path component.
+var clusterIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 
 // sessionID returns a short random identifier so concurrent sessions on the same cluster never
 // share a directory (and so a kubeconfig/cache file).

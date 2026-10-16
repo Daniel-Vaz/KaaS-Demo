@@ -112,3 +112,15 @@ func TestServeRequiresKey(t *testing.T) {
 		t.Fatalf("Serve with no key = %v, want a missing-key error", err)
 	}
 }
+
+// TestServeRejectsBadClusterID: the cluster ID names a dir under WorkDir, so a traversal is refused
+// before anything touches the filesystem.
+func TestServeRejectsBadClusterID(t *testing.T) {
+	r := testRunner()
+	for _, bad := range []string{"", "..", "../../etc", "a/b", ".hidden"} {
+		err := r.Serve(context.Background(), bad, "vm", "10.0.0.5", 24, 80, closedConn{})
+		if err == nil || !strings.Contains(err.Error(), "not a valid cluster ID") {
+			t.Errorf("Serve(clusterID=%q) = %v, want a cluster-ID validation error", bad, err)
+		}
+	}
+}

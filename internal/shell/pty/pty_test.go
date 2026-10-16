@@ -1,8 +1,11 @@
 package pty
 
 import (
+	"context"
 	"strings"
 	"testing"
+
+	"github.com/Daniel-Vaz/KaaS-demo/internal/domain"
 )
 
 // TestSessionEnvIsScrubbed is the security regression guard for the cluster shell: the child shell
@@ -56,6 +59,18 @@ func TestSessionEnvIsScrubbed(t *testing.T) {
 	for k, w := range want {
 		if got[k] != w {
 			t.Errorf("session env %q = %q, want %q", k, got[k], w)
+		}
+	}
+}
+
+// TestServeRejectsBadClusterID: the cluster ID comes from the agent handshake and names a dir under
+// WorkDir, so a traversal is refused before anything touches the filesystem.
+func TestServeRejectsBadClusterID(t *testing.T) {
+	r := New("", t.TempDir(), "", nil)
+	for _, bad := range []string{"", "..", "../../etc", "a/b", ".hidden"} {
+		err := r.Serve(context.Background(), &domain.Cluster{ID: bad, Name: "x"}, []byte("kc"), 24, 80, nil)
+		if err == nil || !strings.Contains(err.Error(), "not a valid cluster ID") {
+			t.Errorf("Serve(ID=%q) = %v, want a cluster-ID validation error", bad, err)
 		}
 	}
 }

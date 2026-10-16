@@ -36,6 +36,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -89,6 +90,11 @@ func (r *Runner) Serve(ctx context.Context, clusterID, vmName, ip string, rows, 
 	// as an option rather than a host. Anything that is not a literal address is refused outright.
 	if net.ParseIP(ip) == nil {
 		return fmt.Errorf("sshpty: %q is not a valid node IP", ip)
+	}
+	// clusterID names the session dir below, so it must be a single plain path component - a
+	// "../.." would otherwise place (and RemoveAll) a directory outside WorkDir.
+	if !clusterIDPattern.MatchString(clusterID) {
+		return fmt.Errorf("sshpty: %q is not a valid cluster ID", clusterID)
 	}
 	if r.KeyFile == "" {
 		return errors.New("sshpty: no SSH key configured - set KAAS_SSH_PRIVATE_KEY_FILE on the node-ssh sandbox")
@@ -240,6 +246,9 @@ func (r *Runner) watchIdle(ctx context.Context, lastInput *atomic.Int64, f *os.F
 		}
 	}
 }
+
+// clusterIDPattern accepts a cluster ID only as a single, dot-free path component.
+var clusterIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 
 // sessionID returns a short random identifier so concurrent sessions never share a HOME.
 func sessionID() string {
