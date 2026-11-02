@@ -128,9 +128,11 @@ jobs:
         working-directory: ansible
     steps:
       - uses: actions/checkout@v7
+      # Pinned, not '3.x': ansible-core lags new CPython releases and fails to import on one it
+      # doesn't support yet (3.15 broke it), so a runner image bump would redden every PR.
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.x'
+          python-version: '3.13'
       # Only ansible.builtin is used, so ansible-core alone is enough - no extra collections.
       - run: pip install ansible-core
       - name: Syntax-check every playbook
