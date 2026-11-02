@@ -11,7 +11,7 @@ require (
 	github.com/riverqueue/river v0.50.0
 	github.com/riverqueue/river/riverdriver/riverpgxv5 v0.50.0
 	github.com/riverqueue/river/rivertype v0.50.0
-	github.com/vmware/govmomi v0.56.0
+	github.com/vmware/govmomi v0.56.2
 	golang.org/x/crypto v0.58.0
 	gopkg.in/yaml.v3 v3.0.1
 )
